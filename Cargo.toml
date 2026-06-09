@@ -1,0 +1,29 @@
+[package]
+name = "anvil-engine"
+version = "0.1.0"
+edition = "2021"
+description = "Anvil chess engine (NNUE) - standalone UCI engine, no GUI"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "anvil_engine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "anvil-engine"
+path = "src/main.rs"
+
+# The NNUE weights are a raw .bin baked in with include_bytes!, so no decode
+# crates are needed. once_cell gives a lazy one-time parse into typed arrays.
+[dependencies]
+once_cell = "1"
+
+# Release tuning for the standalone engine. This is the root manifest of the
+# engine repo, so these profile settings are honored here. (When the engine is
+# built as a path dependency of the match tools, that workspace's profile
+# governs instead.)
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

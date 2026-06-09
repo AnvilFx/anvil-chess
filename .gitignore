@@ -1,0 +1,5 @@
+# Build output
+/target
+
+# Local machine-specific permissions
+/.claude/settings.local.json

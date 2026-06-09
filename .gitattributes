@@ -1,0 +1,6 @@
+# Keep binary assets byte-exact: never apply line-ending conversion.
+*.exe   binary
+*.nnue  binary
+*.bin   binary
+*.png   binary
+*.ico   binary

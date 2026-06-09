@@ -1,0 +1,8 @@
+# Build for this machine's CPU (enables AVX2/BMI2 etc. for movegen and the
+# non-NNUE hot paths). The NNUE itself already runtime-detects AVX-VNNI/AVX2,
+# so it stays correct regardless; this flag speeds up everything else.
+#
+# For a portable binary you can distribute to other machines, replace "native"
+# with "x86-64-v3" (AVX2 baseline, runs on Haswell+) or remove this file.
+[build]
+rustflags = ["-C", "target-cpu=native"]
