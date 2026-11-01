@@ -425,6 +425,19 @@ fn adjust_eval(eval: i32, tt_score: Option<i32>, bound: u8) -> i32 {
 }
 
 const MAX_PLY: usize = 128;
+const IIR_MIN_DEPTH: u32 = 4;
+const CORR_SIZE: usize = 16_384;
+/// Corrections are stored in 1/256 cp.
+const CORR_GRAIN: i32 = 256;
+const CORR_MAX: i32 = CORR_GRAIN * 64;
+
+#[inline]
+fn pawn_key(board: &Board) -> usize {
+    let w = board.piece_bb[Color::White.idx()][PieceKind::Pawn.idx()];
+    let b = board.piece_bb[Color::Black.idx()][PieceKind::Pawn.idx()];
+    let h = w.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ b.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    (h >> (64 - CORR_SIZE.trailing_zeros())) as usize
+}
 const HISTORY_MAX: i32 = 16_384;
 
 const PIECE_NB: usize = 12;
@@ -661,6 +674,8 @@ struct SearchCtx {
     played: [Option<(u8, u8)>; MAX_PLY],
     /// Static eval at each ply of the current path; None when in check.
     evals: [Option<i32>; MAX_PLY],
+    /// How far search results have strayed from the raw eval, per side to move and pawn structure.
+    corr: Box<[[i16; CORR_SIZE]; 2]>,
     /// Hashes from game start to the parent of the current node.
     hashes: Vec<u64>,
 }
@@ -683,6 +698,7 @@ impl SearchCtx {
             cont: ContHist::new(),
             played: [None; MAX_PLY],
             evals: [None; MAX_PLY],
+            corr: Box::new([[0; CORR_SIZE]; 2]),
             hashes: Vec::with_capacity(MAX_PLY + 64),
         }
     }
@@ -713,6 +729,38 @@ impl SearchCtx {
         self.killers = [[None; 2]; MAX_PLY];
         self.history_heur = [[0; 64]; 64];
         self.cont.clear();
+        self.corr.iter_mut().for_each(|t| t.fill(0));
+    }
+
+    #[inline]
+    fn corrected_eval(&self, board: &Board, raw: i32) -> i32 {
+        let c = self.corr[board.side_to_move.idx()][pawn_key(board)] as i32 / CORR_GRAIN;
+        (raw + c).clamp(-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1)
+    }
+
+    /// Moves the correction toward `best - raw`, weighted by depth. Skips results whose bound
+    /// says nothing about the eval, mates, and noisy best moves.
+    fn update_correction(
+        &mut self,
+        board: &Board,
+        raw: i32,
+        static_eval: i32,
+        best: i32,
+        best_move: Option<Move>,
+        bound: u8,
+        depth: u32,
+    ) {
+        if best.abs() >= MATE_THRESHOLD
+            || best_move.is_some_and(|m| m.is_capture() || m.is_promotion())
+            || (bound == BOUND_LOWER && best <= static_eval)
+            || (bound == BOUND_UPPER && best >= static_eval)
+        {
+            return;
+        }
+        let target = (best - raw).clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
+        let weight = (depth as i32 + 1).min(16);
+        let e = &mut self.corr[board.side_to_move.idx()][pawn_key(board)];
+        *e = ((*e as i32 * (256 - weight) + target * weight) / 256) as i16;
     }
 
     #[inline]
@@ -865,11 +913,12 @@ fn search_root(
     let root_hash = board.hash;
     let original_alpha = alpha;
     ctx.pv_len[0] = 0;
-    ctx.evals[0] = if board.in_check(board.side_to_move) {
+    let raw_eval = if board.in_check(board.side_to_move) {
         None
     } else {
         Some(ctx.accs.evaluate(board.side_to_move))
     };
+    ctx.evals[0] = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let tt_move = tt.probe(root_hash).map(|e| Move(e.move_packed));
     let mut sm = ScoredMoves::from_list(&moves, board, pv, tt_move, ctx, 0);
     let mut best: Option<Move> = None;
@@ -920,7 +969,7 @@ fn search_root(
             root_hash,
             best,
             tt_score_to_store(best_score, 0),
-            ctx.evals[0],
+            raw_eval,
             depth.min(255) as u8,
             bound,
         );
@@ -931,7 +980,7 @@ fn search_root(
 #[allow(clippy::too_many_arguments)]
 fn negamax(
     board: &mut Board,
-    depth: u32,
+    mut depth: u32,
     mut alpha: i32,
     beta: i32,
     ply: u32,
@@ -1003,14 +1052,19 @@ fn negamax(
     if depth == 0 {
         return qsearch(board, alpha, beta, ply, ctx, tt);
     }
+    // Without a TT move this node was never searched well; spend less on it.
+    if depth >= IIR_MIN_DEPTH && tt_move.is_none() && excluded.is_none() {
+        depth -= 1;
+    }
 
     let in_check = board.in_check(board.side_to_move);
     let p = ctx.params;
-    let static_eval = if in_check {
+    let raw_eval = if in_check {
         None
     } else {
         Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board.side_to_move)))
     };
+    let static_eval = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let eval = static_eval.map(|ev| adjust_eval(ev, tt_score, tt_bound));
     ctx.evals[ply_us] = static_eval;
     // Compare with our previous turn; fall back a full move if that node was in check.
@@ -1218,10 +1272,13 @@ fn negamax(
                     hash,
                     Some(m),
                     tt_score_to_store(best_score, ply_i),
-                    static_eval,
+                    raw_eval,
                     depth.min(255) as u8,
                     BOUND_LOWER,
                 );
+                if let (Some(raw), Some(se)) = (raw_eval, static_eval) {
+                    ctx.update_correction(board, raw, se, best_score, Some(m), BOUND_LOWER, depth);
+                }
             }
             return best_score;
         }
@@ -1237,10 +1294,13 @@ fn negamax(
             hash,
             best_move,
             tt_score_to_store(best_score, ply_i),
-            static_eval,
+            raw_eval,
             depth.min(255) as u8,
             bound,
         );
+        if let (Some(raw), Some(se)) = (raw_eval, static_eval) {
+            ctx.update_correction(board, raw, se, best_score, best_move, bound, depth);
+        }
     }
     best_score
 }
@@ -1369,15 +1429,15 @@ fn qsearch(
     let in_check = board.in_check(board.side_to_move);
 
     let mut best_score = -INF;
-    let mut static_eval: Option<i32> = None;
+    let mut raw_eval: Option<i32> = None;
     if !in_check {
         let raw = tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board.side_to_move));
-        static_eval = Some(raw);
-        let stand_pat = adjust_eval(raw, tt_score, tt_bound);
+        raw_eval = Some(raw);
+        let stand_pat = adjust_eval(ctx.corrected_eval(board, raw), tt_score, tt_bound);
         best_score = stand_pat;
         if stand_pat >= beta {
             if tt_bound == BOUND_NONE {
-                tt.store(hash, None, tt_score_to_store(stand_pat, ply_i), static_eval, 0, BOUND_LOWER);
+                tt.store(hash, None, tt_score_to_store(stand_pat, ply_i), raw_eval, 0, BOUND_LOWER);
             }
             return stand_pat;
         }
@@ -1444,7 +1504,7 @@ fn qsearch(
             best_move = Some(m);
         }
         if score >= beta {
-            tt.store(hash, Some(m), tt_score_to_store(best_score, ply_i), static_eval, 0, BOUND_LOWER);
+            tt.store(hash, Some(m), tt_score_to_store(best_score, ply_i), raw_eval, 0, BOUND_LOWER);
             return best_score;
         }
         if score > alpha {
@@ -1453,7 +1513,7 @@ fn qsearch(
     }
 
     let bound = if best_score > original_alpha { BOUND_EXACT } else { BOUND_UPPER };
-    tt.store(hash, best_move, tt_score_to_store(best_score, ply_i), static_eval, 0, bound);
+    tt.store(hash, best_move, tt_score_to_store(best_score, ply_i), raw_eval, 0, bound);
     best_score
 }
 
