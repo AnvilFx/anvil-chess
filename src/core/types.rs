@@ -1,5 +1,3 @@
-// Core vocabulary types: colours, pieces, squares, moves, castle rights.
-
 use std::fmt;
 use std::mem::MaybeUninit;
 
@@ -28,10 +26,6 @@ impl Color {
     }
 }
 
-// =============================================================================
-// PIECE KIND + PIECE
-// =============================================================================
-
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PieceKind {
@@ -49,8 +43,6 @@ impl PieceKind {
         self as usize
     }
 
-    /// Inverse of `idx`. Panics on out-of-range input. Used by mailbox
-    /// decoding where the encoding guarantees a valid range.
     pub const fn from_idx(idx: usize) -> PieceKind {
         match idx {
             0 => PieceKind::Pawn,
@@ -70,11 +62,6 @@ pub struct Piece {
     pub kind: PieceKind,
 }
 
-// =============================================================================
-// SQUARE
-// =============================================================================
-
-/// A board square index in standard layout (A1 = 0, ..., H8 = 63).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Square(pub u8);
 
@@ -99,14 +86,11 @@ impl Square {
         self.0 >> 3
     }
 
-    /// Single-bit bitboard for this square.
     #[inline]
     pub const fn bb(self) -> u64 {
         1u64 << self.0
     }
 
-    /// Parse algebraic notation like "e4" or "h8". Returns None for any
-    /// malformed input.
     pub fn from_algebraic(s: &str) -> Option<Square> {
         let bytes = s.as_bytes();
         if bytes.len() != 2 {
@@ -133,18 +117,7 @@ impl fmt::Display for Square {
     }
 }
 
-// =============================================================================
-// MOVE
-// =============================================================================
-
-/// Packed 16-bit move encoding:
-///   bits 0-5:   from square (0-63)
-///   bits 6-11:  to   square (0-63)
-///   bits 12-15: flag (move kind, see constants below)
-///
-/// Flag taxonomy follows the chessprogramming.org "Encoding Moves" page.
-/// The two-bit suffix on promotion flags doubles as the promotion piece:
-///   8/12 = N, 9/13 = B, 10/14 = R, 11/15 = Q.
+/// Bits 0-5 from, 6-11 to, 12-15 flag (chessprogramming.org "Encoding Moves").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub struct Move(pub u16);
 
@@ -186,13 +159,11 @@ impl Move {
         (self.0 >> 12) & 0xF
     }
 
-    /// True for any promotion flag (4 plain + 4 capture variants).
     #[inline]
     pub const fn is_promotion(self) -> bool {
         self.flag() & 0b1000 != 0
     }
 
-    /// True for regular captures, en-passant captures, and capture-promotions.
     #[inline]
     pub const fn is_capture(self) -> bool {
         let f = self.flag();
@@ -201,15 +172,12 @@ impl Move {
             || f >= Self::PROMO_CAP_KNIGHT
     }
 
-    /// True for either castling flag.
     #[inline]
     pub const fn is_castle(self) -> bool {
         let f = self.flag();
         f == Self::CASTLE_KING || f == Self::CASTLE_QUEEN
     }
 
-    /// Returns the piece type a pawn promotes to, or None if this move
-    /// isn't a promotion. The low two bits of the flag encode the kind.
     pub fn promo_kind(self) -> Option<PieceKind> {
         if !self.is_promotion() {
             return None;
@@ -225,8 +193,6 @@ impl Move {
 
 impl fmt::Display for Move {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        // UCI move string: "from""to" plus optional promotion letter, e.g.
-        // "e2e4" or "e7e8q".
         write!(f, "{}{}", self.from(), self.to())?;
         if let Some(k) = self.promo_kind() {
             let ch = match k {
@@ -294,11 +260,6 @@ impl MoveList {
     }
 }
 
-// =============================================================================
-// CASTLE RIGHTS
-// =============================================================================
-
-/// Castle availability as a 4-bit mask.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct CastleRights(pub u8);
 

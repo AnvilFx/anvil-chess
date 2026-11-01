@@ -1,18 +1,9 @@
-// NNUE inference: incremental i16 accumulator + AVX-VNNI/scalar head.
-//
-// The whole crate is built with target-cpu=native (see .cargo/config.toml), so
-// the plain per-element loops below auto-vectorize to AVX2 without an explicit
-// intrinsic path or a runtime feature branch. The one case the compiler cannot
-// express well on its own is the VNNI dot product (vpdpbusd), which keeps a
-// hand-written intrinsic path; everything else is a straight loop.
+// Built with target-cpu=native, so plain loops auto-vectorize; only the VNNI head uses intrinsics.
 
 use super::params::*;
 use crate::core::{Board, Color, Move, PieceKind, Square, UndoInfo};
 
-// AVX-VNNI head: pack activations to u8 in natural order, vpdpbusd against the
-// i8 weights. Summing all 8 lanes at the end makes the product-grouping
-// irrelevant, so no lane-permute is needed, only activation[i] aligned to
-// weight[i].
+// All lanes are summed at the end, so no lane permute is needed.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,avxvnni")]
 unsafe fn head_dot_vnni(
@@ -43,15 +34,12 @@ unsafe fn head_dot_vnni(
     for v in lanes {
         sum += v;
     }
-    // Scalar tail if 2N is not a multiple of 32.
     for i in (chunks * 32)..total {
         sum += act[i] as i32 * head[i] as i32;
     }
     sum
 }
 
-// Plain dot product. Under target-cpu=native (AVX2) this auto-vectorizes; it is
-// also the correct fallback on any machine without AVX-VNNI.
 #[inline]
 fn head_dot_scalar(
     us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDDEN],
@@ -79,11 +67,7 @@ fn head_dot(
     head_dot_scalar(us, them, head, qa, head_bias)
 }
 
-// === Feature indexing ===
-
-// The (white-perspective, black-perspective) feature row indices for a piece of
-// `color`/`kind` on `sq`. Black's perspective mirrors the square vertically and
-// swaps the side-to-move half of the feature space.
+// Returns (white-perspective, black-perspective) feature indices.
 #[inline]
 fn feature_indices(color: Color, kind: PieceKind, sq: usize) -> (usize, usize) {
     let kind_w = if color == Color::White { kind.idx() } else { kind.idx() + 6 };
@@ -94,16 +78,7 @@ fn feature_indices(color: Color, kind: PieceKind, sq: usize) -> (usize, usize) {
     (feat_w, feat_b)
 }
 
-// === Fused accumulator transitions ===
-//
-// A move's effect on the accumulator is a handful of feature rows added and
-// subtracted. Applying them as `dst = src + adds - subs` in a single pass over
-// the hidden layer reads and writes each accumulator element exactly once and
-// folds the parent->child copy into the same loop (no separate clone). QA is
-// calibrated so no real position overflows i16, so wrapping ops are
-// value-identical to checked adds but never panic in debug.
-
-// One add, one sub (a quiet move, or a non-capturing promotion).
+// Real positions never overflow i16; wrapping ops just avoid debug-mode panics.
 #[inline]
 fn transition_add_sub(
     src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
@@ -121,7 +96,6 @@ fn transition_add_sub(
     }
 }
 
-// One add, two subs (a capture, including a capturing promotion or en passant).
 #[inline]
 fn transition_add_sub2(
     src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
@@ -141,7 +115,6 @@ fn transition_add_sub2(
     }
 }
 
-// Two adds, two subs (castling: king and rook both move).
 #[inline]
 fn transition_add2_sub2(
     src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
@@ -168,8 +141,6 @@ fn transition_add2_sub2(
     }
 }
 
-// === Accumulator (incremental updates) ===
-
 #[derive(Clone)]
 pub struct Accumulator {
     pub white: [i16; N_HIDDEN],
@@ -182,8 +153,6 @@ impl Accumulator {
         Self { white: bias, black: bias }
     }
 
-    // Add one piece's contribution in place. Used only to build an accumulator
-    // from scratch (`recompute`); the hot path uses the fused transitions.
     #[inline]
     fn add_piece(&mut self, color: Color, kind: PieceKind, sq: usize) {
         let (feat_w, feat_b) = feature_indices(color, kind, sq);
@@ -224,8 +193,6 @@ impl Accumulator {
     }
 }
 
-// === Accumulator stack ===
-
 pub const MAX_ACC_PLY: usize = 256;
 
 pub struct AccStack {
@@ -263,8 +230,6 @@ impl AccStack {
         let arrived = board_after
             .piece_at(to)
             .expect("push_after: arrived square is empty");
-        // The mover leaves `from` as its pre-move kind (a pawn for promotions)
-        // and lands on `to` as whatever it is now.
         let original_kind = if m.is_promotion() { PieceKind::Pawn } else { arrived.kind };
         let sub_mover = feature_indices(stm, original_kind, from.0 as usize);
         let add_mover = feature_indices(stm, arrived.kind, to.0 as usize);
@@ -307,10 +272,7 @@ impl AccStack {
         self.ply += 1;
     }
 
-    // A null move changes only the side to move, not piece placement, so the
-    // accumulator is identical to the parent's. `evaluate(stm)` selects the
-    // perspective from the same slot, and the next real push reads it as its
-    // source, so there is nothing to copy or advance.
+    // Piece placement is unchanged, so the parent's accumulator is reused as is.
     #[inline]
     pub fn push_null(&mut self) {}
 
@@ -329,11 +291,6 @@ mod tests {
     use super::*;
     use crate::core::{Board, MoveList};
 
-    // The fused incremental transitions must reproduce, exactly, an accumulator
-    // built from scratch for the resulting position. Every legal move of each
-    // FEN is exercised, so the set of positions is chosen to cover all move
-    // shapes: castling both sides, captures, en passant, and promotions
-    // (including a capturing promotion).
     fn assert_incremental_matches_recompute(fen: &str) {
         let mut board = Board::from_fen(fen).unwrap();
         let mut list = MoveList::new();
@@ -357,15 +314,14 @@ mod tests {
     #[test]
     fn incremental_matches_recompute_all_move_shapes() {
         let fens = [
-            // Starting position: quiet moves and double pushes.
             "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
-            // Kiwipete: castling both sides, many captures, all piece kinds.
+            // Kiwipete
             "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
-            // En passant available for the side to move.
+            // En passant
             "8/8/8/2k5/3Pp3/8/8/4K3 b - d3 0 1",
-            // Non-capturing promotions.
+            // Promotions
             "4k3/P7/8/8/8/8/8/4K3 w - - 0 1",
-            // Capturing promotion (b7xa8=Q/R/B/N) plus a quiet promotion.
+            // Capturing promotion
             "n3k3/1P6/8/8/8/8/8/4K3 w - - 0 1",
         ];
         for fen in fens {

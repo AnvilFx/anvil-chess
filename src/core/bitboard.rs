@@ -1,53 +1,26 @@
-// Bitboard helpers: population utilities, precomputed attack tables, and
-// magic-bitboard slider attacks.
-
 use super::types::Square;
 use std::sync::LazyLock;
 
-// =============================================================================
-// BITBOARD HELPERS
-// =============================================================================
-
-/// Square of the least-significant set bit. Caller must ensure `bb != 0`.
+/// `bb` must be non-zero.
 #[inline]
 pub const fn lsb(bb: u64) -> Square {
     Square(bb.trailing_zeros() as u8)
 }
 
-/// Pop the LSB from `bb`, returning its square. Returns None if `bb` is
-/// already empty. Used to iterate the set squares of a bitboard:
-///
-/// ```ignore
-/// let mut bb = some_bitboard;
-/// while let Some(sq) = pop_lsb(&mut bb) {
-///     // ... do something with sq ...
-/// }
-/// ```
 #[inline]
 pub fn pop_lsb(bb: &mut u64) -> Option<Square> {
     if *bb == 0 {
         return None;
     }
     let sq = lsb(*bb);
-    *bb &= *bb - 1; // Clear the lowest set bit.
+    *bb &= *bb - 1;
     Some(sq)
 }
-
-// =============================================================================
-// ATTACK TABLES (const, evaluated at compile time)
-// =============================================================================
-//
-// Knight, king, and pawn attacks depend only on the source square (and pawn
-// color), not on board state - precomputed once at compile time and indexed
-// at runtime. Slider attacks (bishop, rook, queen) depend on blocker
-// positions and use magic bitboards (`bishop_attacks` / `rook_attacks`);
-// `*_raycast` variants are kept as a correctness reference.
 
 const fn knight_attacks_from(sq: u8) -> u64 {
     let rank = (sq / 8) as i8;
     let file = (sq % 8) as i8;
     let mut bb = 0u64;
-    // 8 L-shape offsets (df, dr).
     let deltas: [(i8, i8); 8] = [
         (-2, -1), (-2, 1), (-1, -2), (-1, 2),
         (1, -2),  (1, 2),  (2, -1),  (2, 1),
@@ -87,8 +60,7 @@ const fn king_attacks_from(sq: u8) -> u64 {
     bb
 }
 
-/// Pawn attack squares from `sq` if a pawn of `color` (0 = white, 1 = black)
-/// stood there. White pawns attack NE/NW; black pawns attack SE/SW.
+/// `color`: 0 = white, 1 = black.
 const fn pawn_attacks_from(color: u8, sq: u8) -> u64 {
     let rank = (sq / 8) as i8;
     let file = (sq % 8) as i8;
@@ -127,7 +99,6 @@ pub const KING_ATTACKS: [u64; 64] = {
     arr
 };
 
-/// PAWN_ATTACKS[color][sq] = squares a pawn of that color on sq would attack.
 pub const PAWN_ATTACKS: [[u64; 64]; 2] = {
     let mut arr = [[0u64; 64]; 2];
     let mut c = 0;
@@ -141,12 +112,6 @@ pub const PAWN_ATTACKS: [[u64; 64]; 2] = {
     }
     arr
 };
-
-// =============================================================================
-// BETWEEN-SQUARE BITBOARDS (for pin / check-mask computation)
-// =============================================================================
-// BETWEEN_BB[a][b] = bitboard of squares strictly between `a` and `b` on
-// their shared rank, file, or diagonal. Zero if they don't share a line.
 
 const fn between_bb_calc(from: u8, to: u8) -> u64 {
     let af = (from % 8) as i8;
@@ -181,6 +146,7 @@ const fn between_bb_calc(from: u8, to: u8) -> u64 {
     bb
 }
 
+/// Squares strictly between `a` and `b` on a shared line; zero if not aligned.
 pub(crate) const BETWEEN_BB: [[u64; 64]; 64] = {
     let mut arr = [[0u64; 64]; 64];
     let mut i = 0;
@@ -195,13 +161,6 @@ pub(crate) const BETWEEN_BB: [[u64; 64]; 64] = {
     arr
 };
 
-// =============================================================================
-// SLIDER ATTACKS (raycast)
-// =============================================================================
-
-/// Walk outward from `sq` in each of the supplied directions, stopping at
-/// the first occupied square in that direction (inclusive: the blocker
-/// square itself is part of the attack set so captures land correctly).
 fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     let mut attacks = 0u64;
     let file0 = sq.file() as i8;
@@ -259,22 +218,6 @@ pub fn rook_attacks(sq: Square, occ: u64) -> u64 {
 pub fn queen_attacks(sq: Square, occ: u64) -> u64 {
     bishop_attacks(sq, occ) | rook_attacks(sq, occ)
 }
-
-// -----------------------------------------------------------------------------
-// Magic bitboards: O(1) slider attack lookup.
-//
-// Per square, precomputed:
-//   - mask: bitboard of "relevant" occupancy squares (the squares whose
-//     occupancy actually changes the attack pattern - inner squares of the
-//     attack rays, excluding board edges).
-//   - magic: a u64 chosen so that `(occ & mask) * magic >> shift` produces
-//     a unique table index for every distinct attack pattern.
-//   - shift: 64 - popcount(mask)
-//   - offset: where this square's table starts in the shared attack table.
-//
-// Magic numbers are found via random sparse-u64 search at first use; the
-// LazyLock ensures init runs once and is then a plain pointer load.
-// -----------------------------------------------------------------------------
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -371,6 +314,7 @@ fn find_magic_for_sq(sq: u8, mask: u64, is_bishop: bool, rng: &mut XorShift64) -
             rook_attacks_raycast(Square(sq), sub)
         };
         subsets.push((sub, attack));
+        // Carry-Rippler: next subset of `mask`.
         sub = sub.wrapping_sub(mask) & mask;
         if sub == 0 {
             break;

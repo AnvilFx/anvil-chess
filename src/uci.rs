@@ -1,23 +1,23 @@
-// UCI protocol front-end. Reads commands on stdin, drives the search, and
-// emits info/bestmove on stdout. Synchronous: a `go` blocks until the search
-// finishes (fine for fixed depth/movetime/clock play; no `stop` for infinite).
-
 use crate::core::{Board, Color, Move, MoveList, PieceKind, Square};
-use crate::search::{Engine, Limits, MATE_SCORE, MATE_THRESHOLD, PARAM_SPECS};
+use crate::search::{
+    Engine, IterInfo, Limits, MATE_SCORE, MATE_THRESHOLD, PARAM_SPECS, TT_DEFAULT_MB, TT_MAX_MB,
+};
 use crate::timeman::{self, GoLimits};
 use std::io::{self, BufRead, Write};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
+
+const SEARCH_STACK_BYTES: usize = 32 * 1024 * 1024;
 
 pub fn run() {
     let stdin = io::stdin();
     let mut board = Board::default();
     let mut engine = Engine::new();
 
-    // Pay the one-time lazy-init cost (NNUE net parsing, magic attack tables) at
-    // startup rather than on the first `go`. It runs during the GUI handshake,
-    // off any move clock, so the opening move does not absorb a few hundred ms
-    // of warm-up and flag under a tight movetime budget.
     warm_up(&mut engine);
+    let mut session = Session { stop: engine.stop_handle(), engine: Some(engine), search: None };
 
     for line in stdin.lock().lines() {
         let line = match line {
@@ -31,6 +31,7 @@ pub fn run() {
             "uci" => {
                 println!("id name Anvil");
                 println!("id author Anvil contributors");
+                println!("option name Hash type spin default {TT_DEFAULT_MB} min 1 max {TT_MAX_MB}");
                 for s in PARAM_SPECS {
                     println!(
                         "option name {} type spin default {} min {} max {}",
@@ -40,37 +41,102 @@ pub fn run() {
                 println!("uciok");
             }
             "isready" => println!("readyok"),
-            "setoption" => set_option(&mut engine, line),
+            "setoption" => set_option(session.idle(), line),
             "ucinewgame" => {
                 board = Board::default();
-                engine.reset();
+                session.idle().reset();
             }
             "position" => {
                 let history = parse_position(&mut board, line);
-                engine.set_game_history(history);
+                session.idle().set_game_history(history);
             }
-            "go" => handle_go(&mut engine, &mut board, line),
+            "go" => session.go(&board, line),
+            "stop" => session.stop(),
             "quit" => break,
             _ => {}
         }
         let _ = io::stdout().flush();
     }
+    session.stop();
 }
 
-/// Force the lazy statics (NNUE network, magic sliding-attack tables) to
-/// initialize via a tiny throwaway search, then clear the hash so it does not
-/// carry into real play. Only the first call pays the real cost.
+/// Owns the engine while idle; `go` moves it onto a search thread until the search ends.
+struct Session {
+    engine: Option<Engine>,
+    search: Option<JoinHandle<Engine>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl Session {
+    /// Waits for a running search to finish, then returns the engine.
+    fn idle(&mut self) -> &mut Engine {
+        if let Some(handle) = self.search.take() {
+            self.engine = Some(handle.join().expect("search thread panicked"));
+        }
+        self.engine.as_mut().expect("engine missing")
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.idle();
+    }
+
+    fn go(&mut self, board: &Board, line: &str) {
+        self.idle();
+        let mut engine = self.engine.take().expect("engine missing");
+        let mut board = board.clone();
+        let go = parse_go_limits(line);
+        let limits = to_limits(&go, board.side_to_move);
+        let stop = self.stop.clone();
+        // Reset before spawning so an early `stop` isn't lost.
+        stop.store(false, Ordering::Relaxed);
+
+        let handle = thread::Builder::new()
+            .stack_size(SEARCH_STACK_BYTES)
+            .spawn(move || {
+                let (best, ..) = engine.search_with_info(&mut board, limits, &mut print_info);
+                // UCI forbids sending bestmove during `go infinite` before `stop`.
+                if go.infinite {
+                    while !stop.load(Ordering::Relaxed) {
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                match best {
+                    Some(m) => println!("bestmove {}", m),
+                    None => println!("bestmove 0000"),
+                }
+                let _ = io::stdout().flush();
+                engine
+            })
+            .expect("failed to spawn search thread");
+        self.search = Some(handle);
+    }
+}
+
+fn print_info(info: &IterInfo) {
+    let nps = info.nodes * 1000 / info.elapsed_ms.max(1);
+    let pv: Vec<String> = info.pv.iter().map(|m| m.to_string()).collect();
+    println!(
+        "info depth {} seldepth {} score {} nodes {} nps {} hashfull {} time {} pv {}",
+        info.depth,
+        info.seldepth,
+        format_score(info.score),
+        info.nodes,
+        nps,
+        info.hashfull,
+        info.elapsed_ms,
+        pv.join(" ")
+    );
+}
+
+/// Initialize lazy statics (NNUE, magic tables) before the first real search.
 fn warm_up(engine: &mut Engine) {
     let mut b = Board::default();
     let _ = engine.search(&mut b, Limits::depth(6));
     engine.reset();
 }
 
-/// `position startpos [moves ...]` or `position fen <6 fields> [moves ...]`.
-///
-/// Returns the Zobrist hashes of every position reached before the final
-/// (current) one: the game history used for repetition detection in search.
-/// Empty when no moves are given.
+/// Returns the hashes of all positions before the current one, for repetition detection.
 fn parse_position(board: &mut Board, line: &str) -> Vec<u64> {
     let rest = line.strip_prefix("position").unwrap_or("").trim();
     let (setup, moves) = match rest.find("moves") {
@@ -94,7 +160,6 @@ fn parse_position(board: &mut Board, line: &str) -> Vec<u64> {
         for tok in moves.split_whitespace() {
             match find_move(board, tok) {
                 Some(m) => {
-                    // Record the position before this move, then advance.
                     history.push(board.hash);
                     board.make_move(m);
                 }
@@ -105,8 +170,6 @@ fn parse_position(board: &mut Board, line: &str) -> Vec<u64> {
     history
 }
 
-/// Resolve a UCI move string (e.g. "e2e4", "e7e8q", "e1g1" castle) to a legal
-/// Move on the current board, or None if it isn't legal here.
 fn find_move(board: &Board, uci: &str) -> Option<Move> {
     if uci.len() < 4 {
         return None;
@@ -141,9 +204,6 @@ fn find_move(board: &Board, uci: &str) -> Option<Move> {
     None
 }
 
-/// `setoption name <Name> value <Value>`. Only integer `spin` options exist (the
-/// tunable search parameters, see `PARAM_SPECS`); unknown names are ignored per
-/// UCI tolerance. Option names contain no spaces, so the parse is a simple split.
 fn set_option(engine: &mut Engine, line: &str) {
     let after = match line.find(" name ") {
         Some(i) => &line[i + " name ".len()..],
@@ -154,38 +214,15 @@ fn set_option(engine: &mut Engine, line: &str) {
         None => return,
     };
     if let Ok(v) = value.parse::<i32>() {
-        engine.set_param(name, v);
+        if name.eq_ignore_ascii_case("Hash") {
+            engine.set_hash_mb(v.clamp(1, TT_MAX_MB as i32) as usize);
+        } else {
+            engine.set_param(name, v);
+        }
     }
 }
 
-fn handle_go(engine: &mut Engine, board: &mut Board, line: &str) {
-    let limits = parse_go(line, board.side_to_move);
-    let t0 = Instant::now();
-    let (best, score, nodes, depth) = engine.search(board, limits);
-    let ms = t0.elapsed().as_millis().max(1) as u64;
-    let nps = nodes * 1000 / ms;
-
-    let pv = best.map(|m| m.to_string()).unwrap_or_default();
-    println!(
-        "info depth {} score {} nodes {} time {} nps {} pv {}",
-        depth,
-        format_score(score),
-        nodes,
-        ms,
-        nps,
-        pv
-    );
-    match best {
-        Some(m) => println!("bestmove {}", m),
-        None => println!("bestmove 0000"),
-    }
-}
-
-/// Map a `go` command to a search limit. Fixed depth/nodes are honored directly;
-/// `movetime` and clock play route through `timeman` for a soft/hard budget.
-fn parse_go(line: &str, stm: Color) -> Limits {
-    let go = parse_go_limits(line);
-
+fn to_limits(go: &GoLimits, stm: Color) -> Limits {
     if let Some(d) = go.depth {
         return Limits::depth(d);
     }
@@ -193,18 +230,15 @@ fn parse_go(line: &str, stm: Color) -> Limits {
         return Limits::nodes(n);
     }
     if go.infinite {
-        // No async `stop` command yet, so bound infinite to a deep fixed depth.
-        return Limits::depth(64);
+        return Limits::infinite();
     }
     if go.movetime.is_some() || go.wtime.is_some() || go.btime.is_some() {
-        return Limits::budget(timeman::allocate(&go, stm));
+        return Limits::budget(timeman::allocate(go, stm));
     }
 
-    // No constraints given: a sane bounded default rather than searching forever.
     Limits::depth(12)
 }
 
-/// Parse the timing tokens of a `go` command into `GoLimits`.
 fn parse_go_limits(line: &str) -> GoLimits {
     let mut it = line.split_whitespace().skip(1);
     let mut go = GoLimits::default();
@@ -227,7 +261,6 @@ fn parse_go_limits(line: &str) -> GoLimits {
     go
 }
 
-/// UCI score: centipawns, or `mate N` when the score is in mate range.
 fn format_score(score: i32) -> String {
     if score > MATE_THRESHOLD {
         format!("mate {}", (MATE_SCORE - score + 1) / 2)

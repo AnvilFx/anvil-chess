@@ -1,31 +1,17 @@
-// NNUE parameters: the weight struct and a loader for the self-describing
-// `net.nnue` file (a small header + quantized weight arrays).
-//
-// The weights are baked into the binary with include_bytes!, so the engine is
-// a single self-contained executable. To swap in a retrained net, regenerate
-// net.nnue (see tools/gen_net.py) and rebuild - the header carries the quantization
-// params, so no source edits are needed for a same-width retrain.
-
 use once_cell::sync::Lazy;
 
-// Hidden width is a compile-time constant because the accumulator and weight
-// arrays are fixed-size. The net file's header must match it (asserted below).
 pub const N_HIDDEN: usize = 512;
 
 pub struct NnueWeights {
     pub ft_weights: Box<[[i16; N_HIDDEN]; 768]>,
     pub ft_bias: [i16; N_HIDDEN],
     pub head_weights: [i8; 2 * N_HIDDEN],
-    // Quantization params, read from the net header rather than hardcoded:
-    //   activations clamp to [0, qa]; final cp = round(sum_i32 / (qa * qb)).
+    // Activations clamp to [0, qa]; output cp = sum / (qa * qb).
     pub qa: i32,
     pub qb: i32,
     pub head_bias_q: i32,
 }
 
-// net.nnue layout (all little-endian):
-//   header: [n_hidden i32][qa i32][qb i32][head_bias_q i32]   (16 bytes)
-//   body:   768*N i16 ft weights, N i16 ft bias, 2N i8 head weights
 static RAW: &[u8] = include_bytes!("net.nnue");
 
 pub(crate) static WEIGHTS: Lazy<NnueWeights> = Lazy::new(decode_weights);
