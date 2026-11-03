@@ -33,11 +33,17 @@ retrained net, regenerate it and rebuild; the header carries the quantization
 params, so no source edits are needed for a same-width retrain:
 
 ```sh
-python tools/gen_net.py nets/nnue63m.bin nets/nnue63m.json src/eval/net.nnue
+python tools/gen_net.py nets/bullet-ob8.bin nets/bullet-ob8.json src/eval/net.nnue
 cargo build --release
 ```
 
 A change in hidden width also needs `N_HIDDEN` updated in `src/eval/params.rs`.
+
+The engine has 8 output buckets chosen by piece count (bullet's
+`MaterialCount<8>`). Nets are trained with `bullet/examples/anvil.rs`; give
+`gen_net.py` a json with `"n_hidden": 512, "buckets": 8, "head_scale": 400,
+"activation": "screlu"` (see `nets/bullet-ob8.json`).
+Single-output nets such as `nnue63m.bin` are copied into every bucket.
 
 ## CPU target
 

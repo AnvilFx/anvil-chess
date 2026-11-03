@@ -1,0 +1,8 @@
+{
+  "n_hidden": 512,
+  "buckets": 8,
+  "head_scale": 400,
+  "activation": "screlu",
+  "scale": 400.0,
+  "layout": "bullet anvil.rs: l0w[768*N] l0b[N] l1w[B][2N] l1b[B] (f32 LE, padded to 64 bytes)"
+}

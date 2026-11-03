@@ -916,7 +916,7 @@ fn search_root(
     let raw_eval = if board.in_check(board.side_to_move) {
         None
     } else {
-        Some(ctx.accs.evaluate(board.side_to_move))
+        Some(ctx.accs.evaluate(board))
     };
     ctx.evals[0] = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let tt_move = tt.probe(root_hash).map(|e| Move(e.move_packed));
@@ -994,7 +994,7 @@ fn negamax(
         return 0;
     }
     if ply as usize >= MAX_PLY {
-        return ctx.accs.evaluate(board.side_to_move);
+        return ctx.accs.evaluate(board);
     }
     ctx.seldepth = ctx.seldepth.max(ply as usize);
 
@@ -1062,7 +1062,7 @@ fn negamax(
     let raw_eval = if in_check {
         None
     } else {
-        Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board.side_to_move)))
+        Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board)))
     };
     let static_eval = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let eval = static_eval.map(|ev| adjust_eval(ev, tt_score, tt_bound));
@@ -1431,7 +1431,7 @@ fn qsearch(
     let mut best_score = -INF;
     let mut raw_eval: Option<i32> = None;
     if !in_check {
-        let raw = tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board.side_to_move));
+        let raw = tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board));
         raw_eval = Some(raw);
         let stand_pat = adjust_eval(ctx.corrected_eval(board, raw), tt_score, tt_bound);
         best_score = stand_pat;
@@ -1447,7 +1447,7 @@ fn qsearch(
     }
 
     if (ply as usize) >= MAX_PLY {
-        return ctx.accs.evaluate(board.side_to_move);
+        return ctx.accs.evaluate(board);
     }
 
     let mut moves = MoveList::new();

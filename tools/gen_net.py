@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
-# Quantize a trained f32 nnue.bin into the engine's self-describing net.nnue.
+# Quantize a trained f32 net into the engine's self-describing net.nnue.
+#
+# Input (f32 LE), B output buckets (1 for the original nnue63m.bin):
+#   ft_weights[768*N] ft_bias[N] head_weights[B][2N] head_bias[B]
+# This is also bullet's layout when l1w is saved transposed (bullet/examples/anvil.rs).
+# The json gives n_hidden, plus optional "buckets" (default 1) and "head_scale"
+# (default 1; 400 for bullet nets, whose output is in eval-scale units, not cp).
+# The engine applies head_scale after the dot product, so i8 head weights keep
+# their precision. "activation" is "crelu" (default) or "screlu".
+# A single-bucket net is copied into every bucket, so old nets still load.
 #
 # net.nnue layout (little-endian):
-#   header: [n_hidden i32][qa i32][qb i32][head_bias_q i32]   (16 bytes)
-#   body:   768*N i16 ft weights, N i16 ft bias, 2N i8 head weights
+#   header: [n_hidden i32][qa i32][qb i32][n_buckets i32][out_scale i32][activation i32]
+#           (24 bytes; activation 0 = CReLU, 1 = SCReLU)
+#   body:   n_buckets i32 head biases, 768*N i16 ft weights, N i16 ft bias,
+#           n_buckets*2N i8 head weights
 #
 # The header carries the quantization params, so swapping nets is a drop-in:
-# regenerate net.nnue and rebuild. Only a change in hidden width needs a source
-# edit (the N_HIDDEN const in src/eval/params.rs); the loader asserts a match.
+# regenerate net.nnue and rebuild. A change in hidden width or bucket count also
+# needs N_HIDDEN / N_BUCKETS in src/eval/params.rs; the loader asserts a match.
 #
 # Usage (run from the project root):
 #   python tools/gen_net.py nets/nnue63m.bin nets/nnue63m.json src/eval/net.nnue
@@ -18,6 +29,8 @@ import struct
 import sys
 
 MAX_ACTIVE = 32  # max pieces on a board; bounds the active feature count
+ENGINE_BUCKETS = 8  # N_BUCKETS in src/eval/params.rs
+ACTIVATIONS = {"crelu": 0, "screlu": 1}
 
 
 def calibrate_qa(ft_w, ft_b, n):
@@ -40,13 +53,20 @@ def clampi(v, lo, hi):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("bin", help="trained f32 weights (nnue.bin)")
-    ap.add_argument("meta", help="architecture json (nnue.json)")
+    ap.add_argument("bin", help="trained f32 weights")
+    ap.add_argument("meta", help="architecture json")
     ap.add_argument("out", nargs="?", default="src/eval/net.nnue")
     args = ap.parse_args()
 
-    n = json.load(open(args.meta))["n_hidden"]
-    expected = (768 * n + n + 2 * n + 1) * 4
+    meta = json.load(open(args.meta))
+    n = meta["n_hidden"]
+    buckets = meta.get("buckets", 1)
+    head_scale = int(meta.get("head_scale", 1))
+    activation = ACTIVATIONS[meta.get("activation", "crelu")]
+    if buckets not in (1, ENGINE_BUCKETS):
+        sys.exit(f"{buckets} buckets: the engine is built for {ENGINE_BUCKETS}")
+
+    expected = (768 * n + n + buckets * (2 * n + 1)) * 4
     raw = open(args.bin, "rb").read()[:expected]
     if len(raw) != expected:
         sys.exit(f"{args.bin}: expected {expected} bytes, got {len(raw)}")
@@ -55,21 +75,27 @@ def main():
     c = 0
     ft_w = f[c:c + 768 * n]; c += 768 * n
     ft_b = f[c:c + n]; c += n
-    head_w = f[c:c + 2 * n]; c += 2 * n
-    head_b = f[c]
+    head_w = f[c:c + buckets * 2 * n]; c += buckets * 2 * n
+    head_b = f[c:c + buckets]
+    if buckets == 1:
+        head_w *= ENGINE_BUCKETS
+        head_b *= ENGINE_BUCKETS
 
     qa = calibrate_qa(ft_w, ft_b, n)
     qb = calibrate_qb(head_w)
-    head_bias_q = int(round(head_b * qa * qb))
+    head_bias_q = [int(round(b * qa * qb)) for b in head_b]
 
     out = bytearray()
-    out += struct.pack("<4i", n, qa, qb, head_bias_q)
+    out += struct.pack("<6i", n, qa, qb, ENGINE_BUCKETS, head_scale, activation)
+    out += struct.pack(f"<{ENGINE_BUCKETS}i", *head_bias_q)
     out += struct.pack(f"<{len(ft_w)}h", *[clampi(int(round(v * qa)), -32768, 32767) for v in ft_w])
     out += struct.pack(f"<{n}h", *[clampi(int(round(v * qa)), -32768, 32767) for v in ft_b])
-    out += struct.pack(f"<{2 * n}b", *[clampi(int(round(v * qb)), -127, 127) for v in head_w])
+    out += struct.pack(f"<{len(head_w)}b", *[clampi(int(round(v * qb)), -127, 127) for v in head_w])
     open(args.out, "wb").write(out)
 
-    print(f"wrote {args.out}: n_hidden={n} qa={qa} qb={qb} head_bias_q={head_bias_q}")
+    print(f"wrote {args.out}: n_hidden={n} buckets={buckets}->{ENGINE_BUCKETS} qa={qa} qb={qb} out_scale={head_scale} "
+          f"activation={meta.get('activation', 'crelu')}")
+    print(f"  head_bias_q={head_bias_q}")
     print(f"  {len(out):,} bytes")
     if n != 512:
         print(f"  NOTE: n_hidden={n} differs from the default; set N_HIDDEN={n} "

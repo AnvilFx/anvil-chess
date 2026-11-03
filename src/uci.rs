@@ -52,6 +52,12 @@ pub fn run() {
             }
             "go" => session.go(&board, line),
             "stop" => session.stop(),
+            // Static NNUE eval of the current position, side to move's view.
+            "eval" => {
+                let accs = crate::eval::Accumulator::recompute(&board);
+                let bucket = crate::eval::output_bucket(board.occupancy);
+                println!("info string eval {} bucket {bucket}", accs.evaluate(board.side_to_move, bucket));
+            }
             "quit" => break,
             _ => {}
         }

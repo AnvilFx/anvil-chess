@@ -67,6 +67,56 @@ fn head_dot(
     head_dot_scalar(us, them, head, qa, head_bias)
 }
 
+// sum of clamp(x)^2 * w at scale qa^2 * qb. clamp(x) * w fits i16 for |w| <= 127, and each
+// i32 lane gathers 128 terms, so lanes can't overflow; the total needs i64.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn screlu_dot_avx2(
+    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
+) -> i64 {
+    use std::arch::x86_64::*;
+    let zero = _mm256_setzero_si256();
+    let max = _mm256_set1_epi16(qa);
+    let mut acc = zero;
+    for (half, src) in [us, them].into_iter().enumerate() {
+        let wp = head.as_ptr().add(half * N_HIDDEN);
+        for c in 0..N_HIDDEN / 16 {
+            let x = _mm256_loadu_si256(src.as_ptr().add(c * 16) as *const __m256i);
+            let x = _mm256_min_epi16(_mm256_max_epi16(x, zero), max);
+            let w = _mm256_loadu_si256(wp.add(c * 16) as *const __m256i);
+            acc = _mm256_add_epi32(acc, _mm256_madd_epi16(x, _mm256_mullo_epi16(x, w)));
+        }
+    }
+    let mut lanes = [0i32; 8];
+    _mm256_storeu_si256(lanes.as_mut_ptr() as *mut __m256i, acc);
+    lanes.iter().map(|&v| v as i64).sum()
+}
+
+#[inline]
+fn screlu_dot_scalar(
+    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
+) -> i64 {
+    let mut sum = 0i64;
+    for h in 0..N_HIDDEN {
+        let (a, b) = (us[h].clamp(0, qa) as i64, them[h].clamp(0, qa) as i64);
+        sum += a * a * head[h] as i64 + b * b * head[N_HIDDEN + h] as i64;
+    }
+    sum
+}
+
+#[inline]
+fn screlu_dot(
+    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
+) -> i64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if N_HIDDEN % 16 == 0 && std::is_x86_feature_detected!("avx2") {
+            return unsafe { screlu_dot_avx2(us, them, head, qa) };
+        }
+    }
+    screlu_dot_scalar(us, them, head, qa)
+}
+
 // Returns (white-perspective, black-perspective) feature indices.
 #[inline]
 fn feature_indices(color: Color, kind: PieceKind, sq: usize) -> (usize, usize) {
@@ -182,14 +232,20 @@ impl Accumulator {
         a
     }
 
-    pub fn evaluate(&self, stm: Color) -> i32 {
+    pub fn evaluate(&self, stm: Color, bucket: usize) -> i32 {
         let (us, them) = if stm == Color::White {
             (&self.white, &self.black)
         } else {
             (&self.black, &self.white)
         };
-        let sum = head_dot(us, them, &WEIGHTS.head_weights, WEIGHTS.qa as i16, WEIGHTS.head_bias_q);
-        ((sum as f32) / ((WEIGHTS.qa * WEIGHTS.qb) as f32)).round() as i32
+        let qa = WEIGHTS.qa as i16;
+        let sum = if WEIGHTS.screlu {
+            let sq = screlu_dot(us, them, &WEIGHTS.head_weights_i16[bucket], qa);
+            (sq / WEIGHTS.qa as i64) as i32 + WEIGHTS.head_bias_q[bucket]
+        } else {
+            head_dot(us, them, &WEIGHTS.head_weights[bucket], qa, WEIGHTS.head_bias_q[bucket])
+        };
+        ((sum as f32) * WEIGHTS.out_scale as f32 / ((WEIGHTS.qa * WEIGHTS.qb) as f32)).round() as i32
     }
 }
 
@@ -212,8 +268,8 @@ impl AccStack {
     }
 
     #[inline]
-    pub fn evaluate(&self, stm: Color) -> i32 {
-        self.stack[self.ply].evaluate(stm)
+    pub fn evaluate(&self, board: &Board) -> i32 {
+        self.stack[self.ply].evaluate(board.side_to_move, output_bucket(board.occupancy))
     }
 
     pub fn push_after(&mut self, board_after: &Board, m: Move, undo: &UndoInfo) {
@@ -308,6 +364,17 @@ mod tests {
                 "accumulator mismatch after {m} from {fen}",
             );
             board.unmake_move(m, undo);
+        }
+    }
+
+    #[test]
+    fn screlu_simd_matches_scalar_at_extremes() {
+        let us: [i16; N_HIDDEN] = std::array::from_fn(|h| (h as i16 * 37) % 400 - 100);
+        let them = [i16::MAX; N_HIDDEN];
+        let mixed: [i16; 2 * N_HIDDEN] = std::array::from_fn(|i| ((i * 53) % 255) as i16 - 127);
+        for head in [mixed, [127; 2 * N_HIDDEN], [-127; 2 * N_HIDDEN]] {
+            let want = screlu_dot_scalar(&us, &them, &head, 255);
+            assert_eq!(screlu_dot(&us, &them, &head, 255), want);
         }
     }
 
