@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "anvil-engine"
-version = "3.10.0"
+version = "3.10.1"
 dependencies = [
  "once_cell",
 ]
