@@ -470,6 +470,8 @@ fn adjust_eval(eval: i32, tt_score: Option<i32>, bound: u8) -> i32 {
 
 const MAX_PLY: usize = 128;
 const IIR_MIN_DEPTH: u32 = 4;
+/// Node-based time scaling starts once this many iterations have completed.
+const NODE_TM_MIN_DEPTH: u32 = 7;
 const CORR_SIZE: usize = 16_384;
 /// Corrections are stored in 1/256 cp.
 const CORR_GRAIN: i32 = 256;
@@ -641,7 +643,11 @@ fn run_search(
             let target = if fixed_time {
                 limits.soft_ms
             } else {
-                timeman::scaled_soft(limits.soft_ms, limits.hard_ms, bm_stability, best_score, prev_score)
+                // Share of all nodes spent on the best move; unreliable at low depth.
+                let best_share = best_move
+                    .filter(|_| completed_depth >= NODE_TM_MIN_DEPTH && ctx.nodes > 0)
+                    .map(|m| ctx.root_nodes[root_node_idx(m)] as f64 / ctx.nodes as f64);
+                timeman::scaled_soft(limits.soft_ms, limits.hard_ms, bm_stability, best_score, prev_score, best_share)
             };
             if start.elapsed().as_millis() as u64 >= target {
                 break;
@@ -705,6 +711,8 @@ struct SearchCtx {
     abort: Arc<AtomicBool>,
     nodes: u64,
     max_nodes: u64,
+    /// Nodes spent under each root move this search, by from * 64 + to.
+    root_nodes: Box<[u64; 4096]>,
     seldepth: usize,
     /// Triangular PV table: `pv[ply][ply..pv_len[ply]]` is the line from `ply`.
     pv: Box<[[Move; MAX_PLY + 1]; MAX_PLY + 1]>,
@@ -737,6 +745,7 @@ impl SearchCtx {
             abort: Arc::new(AtomicBool::new(false)),
             nodes: 0,
             max_nodes: u64::MAX,
+            root_nodes: Box::new([0; 4096]),
             seldepth: 0,
             pv: Box::new([[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1]),
             pv_len: [0; MAX_PLY + 1],
@@ -771,6 +780,7 @@ impl SearchCtx {
         self.stop = false;
         self.nodes = 0;
         self.max_nodes = max_nodes;
+        self.root_nodes.fill(0);
         self.seldepth = 0;
         self.pv_len = [0; MAX_PLY + 1];
         self.played = [None; MAX_PLY];
@@ -948,6 +958,11 @@ fn search_root_aspiration(
     }
 }
 
+#[inline]
+fn root_node_idx(m: Move) -> usize {
+    m.from().idx() * 64 + m.to().idx()
+}
+
 fn search_root(
     board: &mut Board,
     depth: u32,
@@ -975,6 +990,7 @@ fn search_root(
     let root_in_check = raw_eval.is_none();
     for i in 0..sm.len {
         let (m, _) = sm.pop_best(i);
+        let nodes_before = ctx.nodes;
         let move_key = piece_key(board, m);
         let undo = board.make_move(m);
         ctx.played[1] = Some(move_key);
@@ -1002,6 +1018,7 @@ fn search_root(
         ctx.hashes.pop();
         ctx.accs.pop();
         board.unmake_move(m, undo);
+        ctx.root_nodes[root_node_idx(m)] += ctx.nodes - nodes_before;
         if ctx.stop {
             return (best, best_score);
         }
