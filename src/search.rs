@@ -67,12 +67,25 @@ pub const PARAM_SPECS: &[ParamSpec] = &[
     ParamSpec { name: "NMPBaseR", default: 3, min: 1, max: 5 },
     ParamSpec { name: "NMPDivisor", default: 3, min: 2, max: 8 },
     ParamSpec { name: "NMPMinDepth", default: 2, min: 2, max: 6 },
-    ParamSpec { name: "LMRBase", default: 1, min: 0, max: 4 },
-    ParamSpec { name: "LMRDepthDiv", default: 6, min: 2, max: 16 },
-    ParamSpec { name: "LMRMoveDiv", default: 8, min: 2, max: 24 },
-    ParamSpec { name: "LMRMinDepth", default: 3, min: 2, max: 6 },
-    ParamSpec { name: "LMRMinMove", default: 4, min: 1, max: 8 },
-    ParamSpec { name: "LMRHistoryDiv", default: 9545, min: 256, max: 32768 },
+    // LMR table: (LMRBase + ln(depth) * ln(move number) / LMRDiv) plies, both in hundredths.
+    ParamSpec { name: "LMRBase", default: 75, min: 0, max: 200 },
+    ParamSpec { name: "LMRDiv", default: 225, min: 100, max: 400 },
+    ParamSpec { name: "LMRMinDepth", default: 2, min: 2, max: 6 },
+    // Move index from which LMR applies; one later in PV nodes.
+    ParamSpec { name: "LMRMinMove", default: 1, min: 1, max: 8 },
+    ParamSpec { name: "LMRHistoryDiv", default: 10000, min: 1024, max: 32768 },
+    // LMR adjustments in 1/1024 ply.
+    ParamSpec { name: "LMRCaptOffset", default: 1024, min: 0, max: 3072 },
+    ParamSpec { name: "LMRNotImproving", default: 1024, min: 0, max: 2048 },
+    ParamSpec { name: "LMRCutNode", default: 2048, min: 0, max: 4096 },
+    ParamSpec { name: "LMRTtPv", default: 1024, min: 0, max: 3072 },
+    ParamSpec { name: "LMRCheck", default: 1024, min: 0, max: 2048 },
+    ParamSpec { name: "LMRKiller", default: 1024, min: 0, max: 2048 },
+    ParamSpec { name: "LMRTtCapture", default: 1024, min: 0, max: 2048 },
+    ParamSpec { name: "LMRRootOffset", default: 2048, min: 0, max: 4096 },
+    // After a reduced fail-high, re-search a ply deeper/shallower by score vs best (cp).
+    ParamSpec { name: "LMRDeeperMargin", default: 60, min: 0, max: 200 },
+    ParamSpec { name: "LMRShallowerMargin", default: 10, min: 0, max: 60 },
     // A *MaxDepth of 0 disables that pruning.
     ParamSpec { name: "LMPMaxDepth", default: 2, min: 0, max: 12 },
     ParamSpec { name: "LMPBase", default: 6, min: 1, max: 16 },
@@ -95,11 +108,20 @@ pub struct SearchParams {
     pub nmp_divisor: i32,
     pub nmp_min_depth: i32,
     pub lmr_base: i32,
-    pub lmr_depth_div: i32,
-    pub lmr_move_div: i32,
+    pub lmr_div: i32,
     pub lmr_min_depth: i32,
     pub lmr_min_move: i32,
     pub lmr_history_div: i32,
+    pub lmr_capt_offset: i32,
+    pub lmr_not_improving: i32,
+    pub lmr_cut_node: i32,
+    pub lmr_tt_pv: i32,
+    pub lmr_check: i32,
+    pub lmr_killer: i32,
+    pub lmr_tt_capture: i32,
+    pub lmr_root_offset: i32,
+    pub lmr_deeper_margin: i32,
+    pub lmr_shallower_margin: i32,
     pub lmp_max_depth: i32,
     pub lmp_base: i32,
     pub fp_max_depth: i32,
@@ -122,12 +144,21 @@ impl Default for SearchParams {
             nmp_base_r: 3,
             nmp_divisor: 3,
             nmp_min_depth: 2,
-            lmr_base: 1,
-            lmr_depth_div: 6,
-            lmr_move_div: 8,
-            lmr_min_depth: 3,
-            lmr_min_move: 4,
-            lmr_history_div: 9545,
+            lmr_base: 75,
+            lmr_div: 225,
+            lmr_min_depth: 2,
+            lmr_min_move: 1,
+            lmr_history_div: 10000,
+            lmr_capt_offset: 1024,
+            lmr_not_improving: 1024,
+            lmr_cut_node: 2048,
+            lmr_tt_pv: 1024,
+            lmr_check: 1024,
+            lmr_killer: 1024,
+            lmr_tt_capture: 1024,
+            lmr_root_offset: 2048,
+            lmr_deeper_margin: 60,
+            lmr_shallower_margin: 10,
             lmp_max_depth: 2,
             lmp_base: 6,
             fp_max_depth: 4,
@@ -157,8 +188,17 @@ impl SearchParams {
             "NMPDivisor" => self.nmp_divisor = v,
             "NMPMinDepth" => self.nmp_min_depth = v,
             "LMRBase" => self.lmr_base = v,
-            "LMRDepthDiv" => self.lmr_depth_div = v,
-            "LMRMoveDiv" => self.lmr_move_div = v,
+            "LMRDiv" => self.lmr_div = v,
+            "LMRCaptOffset" => self.lmr_capt_offset = v,
+            "LMRNotImproving" => self.lmr_not_improving = v,
+            "LMRCutNode" => self.lmr_cut_node = v,
+            "LMRTtPv" => self.lmr_tt_pv = v,
+            "LMRCheck" => self.lmr_check = v,
+            "LMRKiller" => self.lmr_killer = v,
+            "LMRTtCapture" => self.lmr_tt_capture = v,
+            "LMRRootOffset" => self.lmr_root_offset = v,
+            "LMRDeeperMargin" => self.lmr_deeper_margin = v,
+            "LMRShallowerMargin" => self.lmr_shallower_margin = v,
             "LMRMinDepth" => self.lmr_min_depth = v,
             "LMRMinMove" => self.lmr_min_move = v,
             "LMRHistoryDiv" => self.lmr_history_div = v,
@@ -658,6 +698,8 @@ struct SearchCtx {
     deadline: Option<Instant>,
     accs: AccStack,
     params: SearchParams,
+    /// Base LMR in 1/1024 ply by [depth][move number].
+    lmr: Box<[[i32; 64]; 64]>,
     stop: bool,
     /// Set from another thread (UCI `stop`); polled alongside the deadline.
     abort: Arc<AtomicBool>,
@@ -690,6 +732,7 @@ impl SearchCtx {
             deadline: None,
             accs: AccStack::new(),
             params: SearchParams::default(),
+            lmr: Box::new([[0; 64]; 64]),
             stop: false,
             abort: Arc::new(AtomicBool::new(false)),
             nodes: 0,
@@ -719,6 +762,12 @@ impl SearchCtx {
     ) {
         self.deadline = deadline;
         self.params = params;
+        let (base, div) = (params.lmr_base as f64 / 100.0, params.lmr_div as f64 / 100.0);
+        for d in 1..64 {
+            for n in 1..64 {
+                self.lmr[d][n] = ((base + (d as f64).ln() * (n as f64).ln() / div) * 1024.0) as i32;
+            }
+        }
         self.stop = false;
         self.nodes = 0;
         self.max_nodes = max_nodes;
@@ -923,6 +972,7 @@ fn search_root(
     let mut sm = ScoredMoves::from_list(&moves, board, pv, tt_move, ctx, 0);
     let mut best: Option<Move> = None;
     let mut best_score = -INF;
+    let root_in_check = raw_eval.is_none();
     for i in 0..sm.len {
         let (m, _) = sm.pop_best(i);
         let move_key = piece_key(board, m);
@@ -934,9 +984,19 @@ fn search_root(
         if i == 0 {
             score = -negamax(board, depth.saturating_sub(1), -beta, -alpha, 1, ctx, tt, true, None, false);
         } else {
-            score = -negamax(board, depth.saturating_sub(1), -alpha - 1, -alpha, 1, ctx, tt, true, None, true);
+            let full = depth.saturating_sub(1);
+            let quiet = !m.is_capture() && !m.is_promotion();
+            let mut reduced = full;
+            if depth >= 3 && i >= 3 && quiet && !root_in_check && !board.in_check(board.side_to_move) {
+                let r = ctx.lmr[(depth as usize).min(63)][(i + 1).min(63)] - ctx.params.lmr_root_offset;
+                reduced = (full as i32 - r / 1024).clamp(1, full as i32) as u32;
+            }
+            score = -negamax(board, reduced, -alpha - 1, -alpha, 1, ctx, tt, true, None, true);
+            if reduced < full && !ctx.stop && score > alpha {
+                score = -negamax(board, full, -alpha - 1, -alpha, 1, ctx, tt, true, None, true);
+            }
             if !ctx.stop && score > alpha && score < beta {
-                score = -negamax(board, depth.saturating_sub(1), -beta, -alpha, 1, ctx, tt, true, None, false);
+                score = -negamax(board, full, -beta, -alpha, 1, ctx, tt, true, None, false);
             }
         }
         ctx.hashes.pop();
@@ -1231,29 +1291,50 @@ fn negamax(
         if i == 0 {
             score = -negamax(board, new_depth, -beta, -alpha, ply + 1, ctx, tt, true, None, !pv_node && !cut_node);
         } else {
-            let do_lmr = !in_check
-                && depth >= p.lmr_min_depth as u32
-                && i >= p.lmr_min_move as usize
-                && !m.is_capture()
-                && !m.is_promotion();
-            let initial_depth = if do_lmr {
-                let base_r = p.lmr_base as u32 + depth / p.lmr_depth_div as u32 + (i as u32) / p.lmr_move_div as u32;
-                let adj = (move_hist / p.lmr_history_div).clamp(-2, 2);
-                let r = (base_r as i32 - adj + !improving as i32 + 2 * cut_node as i32 - tt_pv as i32).max(0) as u32;
-                new_depth.saturating_sub(r).max(1)
-            } else {
-                new_depth
-            };
+            // Captures are reduced too, except in PV nodes.
+            let noisy = m.is_capture() || m.is_promotion();
+            let do_lmr = depth >= p.lmr_min_depth as u32
+                && i >= p.lmr_min_move as usize + pv_node as usize
+                && !(pv_node && noisy);
+            let mut reduced = new_depth;
+            if do_lmr {
+                let mut r = ctx.lmr[(depth as usize).min(63)][(i + 1).min(63)];
+                if noisy {
+                    r -= p.lmr_capt_offset;
+                } else {
+                    r -= (move_hist * 1024 / p.lmr_history_div).clamp(-3072, 3072);
+                    if ctx.killers[ply_us].contains(&Some(m)) {
+                        r -= p.lmr_killer;
+                    }
+                }
+                r += p.lmr_not_improving * !improving as i32;
+                r += p.lmr_cut_node * cut_node as i32;
+                r -= p.lmr_tt_pv * tt_pv as i32;
+                r -= p.lmr_check * board.in_check(board.side_to_move) as i32;
+                r += p.lmr_tt_capture * tt_move.is_some_and(|t| t.is_capture()) as i32;
+                reduced = (new_depth as i32 - r / 1024).clamp(1, new_depth.max(1) as i32) as u32;
+            }
 
-            score =
-                -negamax(board, initial_depth, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, do_lmr || !cut_node);
+            score = -negamax(board, reduced, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, do_lmr || !cut_node);
 
-            if do_lmr && !ctx.stop && score > alpha {
-                score = -negamax(board, new_depth, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, !cut_node);
+            // A reduced move that beat alpha is re-searched, deeper if it looks clearly
+            // better than the best so far and shallower if barely.
+            let mut full = new_depth;
+            if reduced < new_depth && !ctx.stop && score > alpha {
+                if best_score > -INF {
+                    if score > best_score + p.lmr_deeper_margin {
+                        full += 1;
+                    } else if score < best_score + p.lmr_shallower_margin {
+                        full -= 1;
+                    }
+                }
+                if full > reduced {
+                    score = -negamax(board, full, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, !cut_node);
+                }
             }
 
             if !ctx.stop && score > alpha && score < beta {
-                score = -negamax(board, new_depth, -beta, -alpha, ply + 1, ctx, tt, true, None, false);
+                score = -negamax(board, full, -beta, -alpha, ply + 1, ctx, tt, true, None, false);
             }
         }
 
