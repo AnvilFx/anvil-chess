@@ -66,8 +66,16 @@ pub fn allocate(go: &GoLimits, stm: Color) -> TimeBudget {
     TimeBudget { soft_ms: soft, hard_ms: hard }
 }
 
-/// Shrink the soft target while the best move is stable; grow it when the score drops.
-pub fn scaled_soft(soft_ms: u64, hard_ms: u64, bm_stability: u32, score: i32, prev_score: i32) -> u64 {
+/// Shrink the soft target while the best move is stable or takes most of the nodes;
+/// grow it when the score drops or the nodes are spread over several moves.
+pub fn scaled_soft(
+    soft_ms: u64,
+    hard_ms: u64,
+    bm_stability: u32,
+    score: i32,
+    prev_score: i32,
+    best_node_share: Option<f64>,
+) -> u64 {
     if soft_ms == u64::MAX {
         return u64::MAX;
     }
@@ -78,7 +86,9 @@ pub fn scaled_soft(soft_ms: u64, hard_ms: u64, bm_stability: u32, score: i32, pr
     let drop = (prev_score - score).max(0);
     let fall_scale = 1.0 + (drop as f64 / 100.0).min(1.0) * 0.5;
 
-    let scaled = (soft_ms as f64) * stability_scale * fall_scale;
+    let node_scale = best_node_share.map_or(1.0, |f| (1.5 - f.clamp(0.0, 1.0)) * 1.35);
+
+    let scaled = (soft_ms as f64) * stability_scale * fall_scale * node_scale;
     (scaled.round() as u64).clamp(1, hard_ms)
 }
 
@@ -139,17 +149,28 @@ mod tests {
     fn stability_shortens_and_drops_lengthen() {
         let soft = 1000;
         let hard = 4000;
-        let steady = scaled_soft(soft, hard, 8, 50, 50);
-        let fresh = scaled_soft(soft, hard, 0, 50, 50);
+        let steady = scaled_soft(soft, hard, 8, 50, 50, None);
+        let fresh = scaled_soft(soft, hard, 0, 50, 50, None);
         assert!(steady < fresh, "a stable PV should shorten the target");
 
-        let falling = scaled_soft(soft, hard, 0, 10, 90);
+        let falling = scaled_soft(soft, hard, 0, 10, 90, None);
         assert!(falling > fresh, "a falling score should lengthen the target");
         assert!(falling <= hard, "never exceed the hard ceiling");
     }
 
     #[test]
     fn unlimited_soft_passes_through() {
-        assert_eq!(scaled_soft(u64::MAX, u64::MAX, 0, 0, 0), u64::MAX);
+        assert_eq!(scaled_soft(u64::MAX, u64::MAX, 0, 0, 0, None), u64::MAX);
+    }
+
+    #[test]
+    fn node_share_scales_the_target() {
+        let (soft, hard) = (1000, 4000);
+        let plain = scaled_soft(soft, hard, 0, 0, 0, None);
+        let clear = scaled_soft(soft, hard, 0, 0, 0, Some(0.95));
+        let split = scaled_soft(soft, hard, 0, 0, 0, Some(0.3));
+        assert!(clear < plain, "one move taking the nodes should stop sooner");
+        assert!(split > plain, "nodes spread over several moves should think longer");
+        assert!(scaled_soft(soft, 1200, 0, 0, 0, Some(0.0)) <= 1200);
     }
 }
