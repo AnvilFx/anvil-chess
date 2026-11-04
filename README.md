@@ -1,4 +1,4 @@
-# Anvil
+<h1 align="center"><img src="assets/banner.svg" alt="Anvil" width="100%"></h1>
 
 A UCI chess engine written in Rust, with an NNUE evaluation trained only on its own
 self-play games. Anvil has no GUI; use it from any UCI interface (Cute Chess, Arena,
