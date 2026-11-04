@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # Quantize a trained f32 net into the engine's self-describing net.nnue.
 #
-# Input (f32 LE), B output buckets (1 for the original nnue63m.bin):
-#   ft_weights[768*N] ft_bias[N] head_weights[B][2N] head_bias[B]
+# Input (f32 LE), K king buckets, B output buckets (1 for the original nnue63m.bin):
+#   ft_weights[768*K*N] ft_bias[N] head_weights[B][2N] head_bias[B]
 # This is also bullet's layout when l1w is saved transposed (bullet/examples/anvil.rs).
 # The json gives n_hidden, plus optional "buckets" (default 1) and "head_scale"
 # (default 1; 400 for bullet nets, whose output is in eval-scale units, not cp).
 # The engine applies head_scale after the dot product, so i8 head weights keep
 # their precision. "activation" is "crelu" (default) or "screlu".
+# "king_buckets" (32 ints, files a-d per rank from rank 1, as BUCKET_LAYOUT in
+# anvil.rs; default all 0) and "mirrored" (default false) set the input buckets.
 # A single-bucket net is copied into every bucket, so old nets still load.
 #
 # net.nnue layout (little-endian):
 #   header: [n_hidden i32][qa i32][qb i32][n_buckets i32][out_scale i32][activation i32]
-#           (24 bytes; activation 0 = CReLU, 1 = SCReLU)
-#   body:   n_buckets i32 head biases, 768*N i16 ft weights, N i16 ft bias,
+#           [king_buckets i32][mirrored i32] then 32 u8 king bucket layout
+#           (64 bytes; activation 0 = CReLU, 1 = SCReLU)
+#   body:   n_buckets i32 head biases, 768*K*N i16 ft weights, N i16 ft bias,
 #           n_buckets*2N i8 head weights
 #
 # The header carries the quantization params, so swapping nets is a drop-in:
@@ -63,17 +66,22 @@ def main():
     buckets = meta.get("buckets", 1)
     head_scale = int(meta.get("head_scale", 1))
     activation = ACTIVATIONS[meta.get("activation", "crelu")]
+    layout = meta.get("king_buckets", [0] * 32)
+    mirrored = bool(meta.get("mirrored", False))
+    kb = max(layout) + 1
+    if len(layout) != 32 or sorted(set(layout)) != list(range(kb)):
+        sys.exit("king_buckets must be 32 entries numbering buckets 0..K-1")
     if buckets not in (1, ENGINE_BUCKETS):
         sys.exit(f"{buckets} buckets: the engine is built for {ENGINE_BUCKETS}")
 
-    expected = (768 * n + n + buckets * (2 * n + 1)) * 4
+    expected = (768 * kb * n + n + buckets * (2 * n + 1)) * 4
     raw = open(args.bin, "rb").read()[:expected]
     if len(raw) != expected:
         sys.exit(f"{args.bin}: expected {expected} bytes, got {len(raw)}")
     f = list(struct.unpack(f"<{expected // 4}f", raw))
 
     c = 0
-    ft_w = f[c:c + 768 * n]; c += 768 * n
+    ft_w = f[c:c + 768 * kb * n]; c += 768 * kb * n
     ft_b = f[c:c + n]; c += n
     head_w = f[c:c + buckets * 2 * n]; c += buckets * 2 * n
     head_b = f[c:c + buckets]
@@ -86,7 +94,8 @@ def main():
     head_bias_q = [int(round(b * qa * qb)) for b in head_b]
 
     out = bytearray()
-    out += struct.pack("<6i", n, qa, qb, ENGINE_BUCKETS, head_scale, activation)
+    out += struct.pack("<8i", n, qa, qb, ENGINE_BUCKETS, head_scale, activation, kb, int(mirrored))
+    out += bytes(layout)
     out += struct.pack(f"<{ENGINE_BUCKETS}i", *head_bias_q)
     out += struct.pack(f"<{len(ft_w)}h", *[clampi(int(round(v * qa)), -32768, 32767) for v in ft_w])
     out += struct.pack(f"<{n}h", *[clampi(int(round(v * qa)), -32768, 32767) for v in ft_b])
@@ -94,7 +103,7 @@ def main():
     open(args.out, "wb").write(out)
 
     print(f"wrote {args.out}: n_hidden={n} buckets={buckets}->{ENGINE_BUCKETS} qa={qa} qb={qb} out_scale={head_scale} "
-          f"activation={meta.get('activation', 'crelu')}")
+          f"activation={meta.get('activation', 'crelu')} king_buckets={kb} mirrored={mirrored}")
     print(f"  head_bias_q={head_bias_q}")
     print(f"  {len(out):,} bytes")
     if n != 512:

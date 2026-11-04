@@ -45,6 +45,11 @@ The engine has 8 output buckets chosen by piece count (bullet's
 "activation": "screlu"` (see `nets/bullet-ob8.json`).
 Single-output nets such as `nnue63m.bin` are copied into every bucket.
 
+King input buckets and horizontal mirroring are read from the header too:
+`"king_buckets"` (32 entries, files a-d per rank from rank 1, matching
+`BUCKET_LAYOUT` in `anvil.rs`) and `"mirrored"` in the json (see
+`nets/bullet-kb4.json`). Without them the net is unbucketed, as 3.8's is.
+
 ## CPU target
 
 `.cargo/config.toml` sets `target-cpu=native` (AVX2/BMI2 on the build machine).

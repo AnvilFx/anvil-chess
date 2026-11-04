@@ -259,10 +259,13 @@ impl Board {
         match parts.next() {
             Some("-") => board.en_passant = None,
             Some(s) => {
-                board.en_passant = Some(
-                    Square::from_algebraic(s)
-                        .ok_or_else(|| format!("bad en-passant square '{}'", s))?,
-                );
+                let sq = Square::from_algebraic(s)
+                    .ok_or_else(|| format!("bad en-passant square '{}'", s))?;
+                // Same rule as make_move: only kept when a pawn can take on it.
+                let stm = board.side_to_move;
+                let takers = PAWN_ATTACKS[stm.opp().idx()][sq.idx()]
+                    & board.piece_bb[stm.idx()][PieceKind::Pawn.idx()];
+                board.en_passant = (takers != 0).then_some(sq);
             }
             None => return Err("FEN missing en-passant field".into()),
         }
@@ -454,7 +457,10 @@ impl Board {
                 Color::White => Square(from.0 + 8),
                 Color::Black => Square(from.0 - 8),
             };
-            self.en_passant = Some(ep_sq);
+            // Without a capturer the square would only split transpositions.
+            if PAWN_ATTACKS[stm.idx()][ep_sq.idx()] & self.piece_bb[stm.opp().idx()][PieceKind::Pawn.idx()] != 0 {
+                self.en_passant = Some(ep_sq);
+            }
         }
 
         if flag == Move::CASTLE_KING {
@@ -613,6 +619,85 @@ impl Board {
         }
     }
 
+    /// Captures and promotions only, in the order `gen_legal_into` emits them.
+    /// The side to move must not be in check.
+    pub fn gen_noisy_into(&self, list: &mut MoveList) {
+        let stm = self.side_to_move;
+        let king_bb = self.piece_bb[stm.idx()][PieceKind::King.idx()];
+        if king_bb == 0 {
+            return;
+        }
+        let info = self.compute_pin_info(stm);
+        debug_assert_eq!(self.attackers_of_square(info.king_sq, stm.opp()), 0);
+        let opp_bb = self.color_bb[stm.opp().idx()];
+
+        self.gen_pawn_noisy(&info, stm, list);
+        let mut knights = self.piece_bb[stm.idx()][PieceKind::Knight.idx()];
+        while let Some(from) = pop_lsb(&mut knights) {
+            if info.pin_ray[from.idx()] == !0u64 {
+                emit_captures(from, KNIGHT_ATTACKS[from.idx()] & opp_bb, list);
+            }
+        }
+        let mut bishops = self.piece_bb[stm.idx()][PieceKind::Bishop.idx()];
+        while let Some(from) = pop_lsb(&mut bishops) {
+            let targets = bishop_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            emit_captures(from, targets, list);
+        }
+        let mut rooks = self.piece_bb[stm.idx()][PieceKind::Rook.idx()];
+        while let Some(from) = pop_lsb(&mut rooks) {
+            let targets = rook_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            emit_captures(from, targets, list);
+        }
+        let mut queens = self.piece_bb[stm.idx()][PieceKind::Queen.idx()];
+        while let Some(from) = pop_lsb(&mut queens) {
+            let targets = queen_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            emit_captures(from, targets, list);
+        }
+        // King captures, checked one target at a time instead of building the danger map.
+        let occ_no_king = self.occupancy & !king_bb;
+        let mut caps = KING_ATTACKS[info.king_sq.idx()] & opp_bb;
+        while let Some(to) = pop_lsb(&mut caps) {
+            if !self.attacked_with_occ(to, stm.opp(), occ_no_king) {
+                list.push(Move::new(info.king_sq, to, Move::CAPTURE));
+            }
+        }
+    }
+
+    /// Whether the side to move, not in check, has any legal move. Stops at the first
+    /// group of pieces that has one; the king, which needs the danger map, goes last.
+    pub fn has_legal_move(&self) -> bool {
+        let stm = self.side_to_move;
+        if self.piece_bb[stm.idx()][PieceKind::King.idx()] == 0 {
+            return false;
+        }
+        let info = self.compute_pin_info(stm);
+        let mut list = MoveList::new();
+        self.gen_pawn_legal(&info, stm, &mut list);
+        self.gen_knight_legal(&info, stm, &mut list);
+        if !list.is_empty() {
+            return true;
+        }
+        self.gen_bishop_legal(&info, stm, &mut list);
+        self.gen_rook_legal(&info, stm, &mut list);
+        self.gen_queen_legal(&info, stm, &mut list);
+        if !list.is_empty() {
+            return true;
+        }
+        // Castling needs a safe empty square next to the king, which is also a king move.
+        let full = self.compute_check_info(stm);
+        self.gen_king_legal(&full, stm, &mut list);
+        !list.is_empty()
+    }
+
+    fn attacked_with_occ(&self, sq: Square, by: Color, occ: u64) -> bool {
+        let pb = &self.piece_bb[by.idx()];
+        PAWN_ATTACKS[by.opp().idx()][sq.idx()] & pb[PieceKind::Pawn.idx()] != 0
+            || KNIGHT_ATTACKS[sq.idx()] & pb[PieceKind::Knight.idx()] != 0
+            || KING_ATTACKS[sq.idx()] & pb[PieceKind::King.idx()] != 0
+            || bishop_attacks(sq, occ) & (pb[PieceKind::Bishop.idx()] | pb[PieceKind::Queen.idx()]) != 0
+            || rook_attacks(sq, occ) & (pb[PieceKind::Rook.idx()] | pb[PieceKind::Queen.idx()]) != 0
+    }
+
     pub fn generate_legal_moves(&mut self) -> Vec<Move> {
         let mut list = MoveList::new();
         self.gen_legal_into(&mut list);
@@ -625,7 +710,6 @@ impl Board {
         let opp_idx = opp.idx();
         let king_bb = self.piece_bb[stm_idx][PieceKind::King.idx()];
         let king_sq = lsb(king_bb);
-        let own_bb = self.color_bb[stm_idx];
 
         let occ_no_king = self.occupancy & !king_bb;
         let mut danger = 0u64;
@@ -670,6 +754,24 @@ impl Board {
             _ => 0u64,
         };
 
+        CheckInfo {
+            king_sq,
+            checkers,
+            check_mask,
+            pin_ray: self.pin_rays(stm, king_sq),
+            danger,
+        }
+    }
+
+    /// Check info for a side known not to be in check, without the king danger map.
+    fn compute_pin_info(&self, stm: Color) -> CheckInfo {
+        let king_sq = lsb(self.piece_bb[stm.idx()][PieceKind::King.idx()]);
+        CheckInfo { king_sq, checkers: 0, check_mask: !0u64, pin_ray: self.pin_rays(stm, king_sq), danger: 0 }
+    }
+
+    fn pin_rays(&self, stm: Color, king_sq: Square) -> [u64; 64] {
+        let opp_idx = stm.opp().idx();
+        let own_bb = self.color_bb[stm.idx()];
         let mut pin_ray = [!0u64; 64];
         let bishop_q = self.piece_bb[opp_idx][PieceKind::Bishop.idx()]
             | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
@@ -687,14 +789,7 @@ impl Board {
                 }
             }
         }
-
-        CheckInfo {
-            king_sq,
-            checkers,
-            check_mask,
-            pin_ray,
-            danger,
-        }
+        pin_ray
     }
 
     fn gen_knight_legal(&self, info: &CheckInfo, stm: Color, out: &mut MoveList) {
@@ -862,6 +957,53 @@ impl Board {
         }
     }
 
+    /// The noisy part of `gen_pawn_legal`, in the same order: push-promotions, captures, en passant.
+    fn gen_pawn_noisy(&self, info: &CheckInfo, stm: Color, out: &mut MoveList) {
+        let pawns = self.piece_bb[stm.idx()][PieceKind::Pawn.idx()];
+        if pawns == 0 {
+            return;
+        }
+        let opp_bb = self.color_bb[stm.opp().idx()];
+        let empty = !self.occupancy;
+        let step: i8 = if stm == Color::White { 8 } else { -8 };
+        let promo_rank: u8 = if stm == Color::White { 7 } else { 0 };
+
+        let mut p = pawns;
+        while let Some(from) = pop_lsb(&mut p) {
+            let pin = info.pin_ray[from.idx()];
+            let to_idx = from.0 as i8 + step;
+            if (0..64).contains(&to_idx) {
+                let to = Square(to_idx as u8);
+                let to_bb = to.bb();
+                if to.rank() == promo_rank && empty & to_bb != 0 && pin & to_bb != 0 {
+                    out.push(Move::new(from, to, Move::PROMO_QUEEN));
+                    out.push(Move::new(from, to, Move::PROMO_ROOK));
+                    out.push(Move::new(from, to, Move::PROMO_BISHOP));
+                    out.push(Move::new(from, to, Move::PROMO_KNIGHT));
+                }
+            }
+
+            let attacks = PAWN_ATTACKS[stm.idx()][from.idx()];
+            let mut caps = attacks & opp_bb & pin;
+            while let Some(to) = pop_lsb(&mut caps) {
+                if to.rank() == promo_rank {
+                    out.push(Move::new(from, to, Move::PROMO_CAP_QUEEN));
+                    out.push(Move::new(from, to, Move::PROMO_CAP_ROOK));
+                    out.push(Move::new(from, to, Move::PROMO_CAP_BISHOP));
+                    out.push(Move::new(from, to, Move::PROMO_CAP_KNIGHT));
+                } else {
+                    out.push(Move::new(from, to, Move::CAPTURE));
+                }
+            }
+
+            if let Some(ep_sq) = self.en_passant {
+                if attacks & ep_sq.bb() & pin != 0 && self.is_ep_legal(from, ep_sq, stm, info) {
+                    out.push(Move::new(from, ep_sq, Move::EP_CAPTURE));
+                }
+            }
+        }
+    }
+
     /// EP removes two pawns from one rank, which can expose the king to a slider the pin rays miss.
     fn is_ep_legal(&self, from: Square, to: Square, stm: Color, info: &CheckInfo) -> bool {
         let captured_sq = match stm {
@@ -897,6 +1039,12 @@ impl Board {
             self.unmake_move(m, undo);
         }
         nodes
+    }
+}
+
+fn emit_captures(from: Square, mut caps: u64, out: &mut MoveList) {
+    while let Some(to) = pop_lsb(&mut caps) {
+        out.push(Move::new(from, to, Move::CAPTURE));
     }
 }
 
@@ -1013,7 +1161,7 @@ mod tests {
 
     #[test]
     fn en_passant_parses_and_roundtrips() {
-        let fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
+        let fen = "rnbqkbnr/ppp1pppp/8/8/3pP3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1";
         let board = Board::from_fen(fen).unwrap();
         assert_eq!(board.en_passant, Some(Square::new(4, 2)));
         assert_eq!(board.side_to_move, Color::Black);
@@ -1265,11 +1413,44 @@ mod tests {
 
     #[test]
     fn pawn_double_push_sets_en_passant() {
-        let mut board = Board::default();
+        // Black pawn on d4 can take on e3.
+        let mut board = Board::from_fen("rnbqkbnr/ppp1pppp/8/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let m = Move::new(Square::new(4, 1), Square::new(4, 3), Move::DOUBLE_PUSH);
         let _ = board.make_move(m);
         assert_eq!(board.en_passant, Some(Square::new(4, 2))); // e3
         assert_eq!(board.side_to_move, Color::Black);
+        assert_eq!(board.hash, Board::from_fen(&board.to_fen()).unwrap().hash);
+    }
+
+    #[test]
+    fn double_push_without_capturer_sets_no_en_passant() {
+        let mut board = Board::default();
+        let m = Move::new(Square::new(4, 1), Square::new(4, 3), Move::DOUBLE_PUSH);
+        let _ = board.make_move(m);
+        assert_eq!(board.en_passant, None);
+    }
+
+    #[test]
+    fn incremental_hash_matches_fen_rebuild_over_random_games() {
+        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut ep_seen = 0;
+        for _ in 0..200 {
+            let mut board = Board::default();
+            for _ in 0..120 {
+                let mut ml = MoveList::new();
+                board.gen_legal_into(&mut ml);
+                if ml.is_empty() {
+                    break;
+                }
+                rng ^= rng << 13;
+                rng ^= rng >> 7;
+                rng ^= rng << 17;
+                board.make_move(ml.get((rng % ml.len() as u64) as usize));
+                ep_seen += board.en_passant.is_some() as u32;
+                assert_eq!(board.hash, Board::from_fen(&board.to_fen()).unwrap().hash, "{}", board.to_fen());
+            }
+        }
+        assert!(ep_seen > 20);
     }
 
     #[test]
@@ -1395,6 +1576,47 @@ mod tests {
         assert_eq!(board.attackers_of_square(e5, Color::Black), 0);
     }
 
+    // Walks random games and checks the noisy generator against the filtered full list.
+    #[test]
+    fn noisy_gen_matches_filtered_legal_gen() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            "7k/5Q2/6K1/8/8/8/8/8 b - - 0 1",
+        ];
+        let mut rng: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut checked = 0;
+        for fen in fens {
+            for _ in 0..40 {
+                let mut board = Board::from_fen(fen).unwrap();
+                for _ in 0..60 {
+                    let mut all = MoveList::new();
+                    board.gen_legal_into(&mut all);
+                    if !board.in_check(board.side_to_move) {
+                        let want: Vec<Move> = all.iter().filter(|m| m.is_capture() || m.is_promotion()).collect();
+                        let mut noisy = MoveList::new();
+                        board.gen_noisy_into(&mut noisy);
+                        assert_eq!(noisy.iter().collect::<Vec<_>>(), want, "{}", board.to_fen());
+                        assert_eq!(board.has_legal_move(), !all.is_empty(), "{}", board.to_fen());
+                        checked += 1;
+                    }
+                    if all.is_empty() {
+                        break;
+                    }
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    let m = all.get((rng % all.len() as u64) as usize);
+                    board.make_move(m);
+                }
+            }
+        }
+        assert!(checked > 5000);
+    }
+
     #[test]
     fn zobrist_starting_position_nonzero() {
         let board = Board::default();
@@ -1472,7 +1694,7 @@ mod tests {
 
     #[test]
     fn null_move_clears_en_passant() {
-        let mut board = Board::default();
+        let mut board = Board::from_fen("rnbqkbnr/ppp1pppp/8/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let mut ml = MoveList::new();
         board.gen_legal_into(&mut ml);
         let e2e4 = (0..ml.len())

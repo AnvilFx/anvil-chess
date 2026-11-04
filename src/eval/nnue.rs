@@ -117,15 +117,108 @@ fn screlu_dot(
     screlu_dot_scalar(us, them, head, qa)
 }
 
+// Where one side's features live: its king bucket's 768 rows, and a file flip
+// when its king stands on files e-h of a mirrored net.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub struct KingView {
+    base: usize,
+    flip: usize,
+}
+
+impl KingView {
+    // `ksq` is the king square from that side's view (rank 1 = its back rank).
+    #[inline]
+    fn new(ksq: usize) -> Self {
+        let flip = if MIRRORED && ksq % 8 > 3 { 7 } else { 0 };
+        Self { base: 768 * KING_BUCKET[ksq] as usize, flip }
+    }
+
+    #[inline]
+    fn of(board: &Board) -> (Self, Self) {
+        let king = PieceKind::King.idx();
+        let wk = board.piece_bb[0][king].trailing_zeros() as usize;
+        let bk = board.piece_bb[1][king].trailing_zeros() as usize;
+        (Self::new(wk), Self::new(bk ^ 56))
+    }
+
+    // Slot in the refresh cache: one per bucket and mirror side.
+    #[inline]
+    fn slot(self) -> usize {
+        self.base / 768 * 2 + (self.flip != 0) as usize
+    }
+}
+
 // Returns (white-perspective, black-perspective) feature indices.
 #[inline]
-fn feature_indices(color: Color, kind: PieceKind, sq: usize) -> (usize, usize) {
+fn feature_indices(color: Color, kind: PieceKind, sq: usize, wv: KingView, bv: KingView) -> (usize, usize) {
     let kind_w = if color == Color::White { kind.idx() } else { kind.idx() + 6 };
-    let feat_w = kind_w * 64 + sq;
-    let sq_b = sq ^ 56;
+    let feat_w = wv.base + kind_w * 64 + (sq ^ wv.flip);
     let kind_b = if color == Color::Black { kind.idx() } else { kind.idx() + 6 };
-    let feat_b = kind_b * 64 + sq_b;
+    let feat_b = bv.base + kind_b * 64 + (sq ^ 56 ^ bv.flip);
     (feat_w, feat_b)
+}
+
+// One side's accumulator from scratch.
+fn refresh(board: &Board, view: KingView, white_view: bool) -> [i16; N_HIDDEN] {
+    let mut acc = WEIGHTS.ft_bias;
+    for color_idx in 0..2 {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for kind_idx in 0..6 {
+            let kind = PieceKind::from_idx(kind_idx);
+            let mut bb = board.piece_bb[color_idx][kind_idx];
+            while bb != 0 {
+                let sq = bb.trailing_zeros() as usize;
+                bb &= bb - 1;
+                let (feat_w, feat_b) = feature_indices(color, kind, sq, view, view);
+                let row = &WEIGHTS.ft_weights[if white_view { feat_w } else { feat_b }];
+                for h in 0..N_HIDDEN {
+                    acc[h] = acc[h].wrapping_add(row[h]);
+                }
+            }
+        }
+    }
+    acc
+}
+
+// The last accumulator built for one king view and the pieces it was built from, so a
+// refresh only applies what changed since ("Finny table").
+#[derive(Clone)]
+struct CacheEntry {
+    acc: [i16; N_HIDDEN],
+    pieces: [[u64; 6]; 2],
+}
+
+fn refresh_cached(entry: &mut CacheEntry, board: &Board, view: KingView, white_view: bool) -> [i16; N_HIDDEN] {
+    for color_idx in 0..2 {
+        let color = if color_idx == 0 { Color::White } else { Color::Black };
+        for kind_idx in 0..6 {
+            let kind = PieceKind::from_idx(kind_idx);
+            let now = board.piece_bb[color_idx][kind_idx];
+            let old = entry.pieces[color_idx][kind_idx];
+            let row = |sq: usize| {
+                let (feat_w, feat_b) = feature_indices(color, kind, sq, view, view);
+                &WEIGHTS.ft_weights[if white_view { feat_w } else { feat_b }]
+            };
+            let mut added = now & !old;
+            while added != 0 {
+                let r = row(added.trailing_zeros() as usize);
+                added &= added - 1;
+                for h in 0..N_HIDDEN {
+                    entry.acc[h] = entry.acc[h].wrapping_add(r[h]);
+                }
+            }
+            let mut removed = old & !now;
+            while removed != 0 {
+                let r = row(removed.trailing_zeros() as usize);
+                removed &= removed - 1;
+                for h in 0..N_HIDDEN {
+                    entry.acc[h] = entry.acc[h].wrapping_sub(r[h]);
+                }
+            }
+            entry.pieces[color_idx][kind_idx] = now;
+        }
+    }
+    entry.acc
 }
 
 // Real positions never overflow i16; wrapping ops just avoid debug-mode panics.
@@ -195,41 +288,19 @@ fn transition_add2_sub2(
 pub struct Accumulator {
     pub white: [i16; N_HIDDEN],
     pub black: [i16; N_HIDDEN],
+    wv: KingView,
+    bv: KingView,
 }
 
 impl Accumulator {
     pub fn empty() -> Self {
         let bias = WEIGHTS.ft_bias;
-        Self { white: bias, black: bias }
-    }
-
-    #[inline]
-    fn add_piece(&mut self, color: Color, kind: PieceKind, sq: usize) {
-        let (feat_w, feat_b) = feature_indices(color, kind, sq);
-        let ft = &WEIGHTS.ft_weights;
-        let row_w = &ft[feat_w];
-        let row_b = &ft[feat_b];
-        for h in 0..N_HIDDEN {
-            self.white[h] = self.white[h].wrapping_add(row_w[h]);
-            self.black[h] = self.black[h].wrapping_add(row_b[h]);
-        }
+        Self { white: bias, black: bias, wv: KingView::default(), bv: KingView::default() }
     }
 
     pub fn recompute(board: &Board) -> Self {
-        let mut a = Self::empty();
-        for color_idx in 0..2 {
-            let color = if color_idx == 0 { Color::White } else { Color::Black };
-            for kind_idx in 0..6 {
-                let kind = PieceKind::from_idx(kind_idx);
-                let mut bb = board.piece_bb[color_idx][kind_idx];
-                while bb != 0 {
-                    let sq = bb.trailing_zeros() as usize;
-                    bb &= bb - 1;
-                    a.add_piece(color, kind, sq);
-                }
-            }
-        }
-        a
+        let (wv, bv) = KingView::of(board);
+        Self { white: refresh(board, wv, true), black: refresh(board, bv, false), wv, bv }
     }
 
     pub fn evaluate(&self, stm: Color, bucket: usize) -> i32 {
@@ -238,14 +309,14 @@ impl Accumulator {
         } else {
             (&self.black, &self.white)
         };
-        let qa = WEIGHTS.qa as i16;
-        let sum = if WEIGHTS.screlu {
-            let sq = screlu_dot(us, them, &WEIGHTS.head_weights_i16[bucket], qa);
-            (sq / WEIGHTS.qa as i64) as i32 + WEIGHTS.head_bias_q[bucket]
+        let w = &*WEIGHTS;
+        let sum = if SCRELU {
+            let sq = screlu_dot(us, them, &w.head_weights_i16[bucket], QA as i16);
+            (sq / QA as i64) as i32 + w.head_bias_q[bucket]
         } else {
-            head_dot(us, them, &WEIGHTS.head_weights[bucket], qa, WEIGHTS.head_bias_q[bucket])
+            head_dot(us, them, &w.head_weights[bucket], QA as i16, w.head_bias_q[bucket])
         };
-        ((sum as f32) * WEIGHTS.out_scale as f32 / ((WEIGHTS.qa * WEIGHTS.qb) as f32)).round() as i32
+        ((sum as f32) * OUT_SCALE as f32 / ((QA * QB) as f32)).round() as i32
     }
 }
 
@@ -254,12 +325,17 @@ pub const MAX_ACC_PLY: usize = 256;
 pub struct AccStack {
     stack: Box<[Accumulator]>,
     ply: usize,
+    // Refresh cache per side (white, black), indexed by KingView::slot.
+    cache: [Vec<CacheEntry>; 2],
 }
 
 impl AccStack {
     pub fn new() -> Self {
         let v: Vec<Accumulator> = (0..MAX_ACC_PLY).map(|_| Accumulator::empty()).collect();
-        Self { stack: v.into_boxed_slice(), ply: 0 }
+        let empty = CacheEntry { acc: WEIGHTS.ft_bias, pieces: [[0; 6]; 2] };
+        let slots = WEIGHTS.ft_weights.len() / 768 * 2;
+        let cache = [vec![empty.clone(); slots], vec![empty; slots]];
+        Self { stack: v.into_boxed_slice(), ply: 0, cache }
     }
 
     pub fn init(&mut self, board: &Board) {
@@ -282,13 +358,14 @@ impl AccStack {
         let to = m.to();
         let flag = m.flag();
         let stm = board_after.side_to_move.opp();
+        let (wv, bv) = KingView::of(board_after);
 
         let arrived = board_after
             .piece_at(to)
             .expect("push_after: arrived square is empty");
         let original_kind = if m.is_promotion() { PieceKind::Pawn } else { arrived.kind };
-        let sub_mover = feature_indices(stm, original_kind, from.0 as usize);
-        let add_mover = feature_indices(stm, arrived.kind, to.0 as usize);
+        let sub_mover = feature_indices(stm, original_kind, from.0 as usize, wv, bv);
+        let add_mover = feature_indices(stm, arrived.kind, to.0 as usize, wv, bv);
 
         if flag == Move::CASTLE_KING || flag == Move::CASTLE_QUEEN {
             let king_side = flag == Move::CASTLE_KING;
@@ -298,8 +375,8 @@ impl AccStack {
                 (false, Color::White) => (Square(0), Square(3)),
                 (false, Color::Black) => (Square(56), Square(59)),
             };
-            let sub_rook = feature_indices(stm, PieceKind::Rook, rf.0 as usize);
-            let add_rook = feature_indices(stm, PieceKind::Rook, rt.0 as usize);
+            let sub_rook = feature_indices(stm, PieceKind::Rook, rf.0 as usize, wv, bv);
+            let add_rook = feature_indices(stm, PieceKind::Rook, rt.0 as usize, wv, bv);
             transition_add2_sub2(
                 &src.white, &src.black, &mut dst.white, &mut dst.black,
                 add_mover, add_rook, sub_mover, sub_rook,
@@ -313,7 +390,7 @@ impl AccStack {
             } else {
                 to
             };
-            let sub_cap = feature_indices(cap.color, cap.kind, cap_sq.0 as usize);
+            let sub_cap = feature_indices(cap.color, cap.kind, cap_sq.0 as usize, wv, bv);
             transition_add_sub2(
                 &src.white, &src.black, &mut dst.white, &mut dst.black,
                 add_mover, sub_mover, sub_cap,
@@ -324,6 +401,17 @@ impl AccStack {
                 add_mover, sub_mover,
             );
         }
+
+        // A king that changed bucket or crossed the mirror line invalidates its side's
+        // incremental update (made with the new view), so that side is rebuilt.
+        if wv != src.wv {
+            dst.white = refresh_cached(&mut self.cache[0][wv.slot()], board_after, wv, true);
+        }
+        if bv != src.bv {
+            dst.black = refresh_cached(&mut self.cache[1][bv.slot()], board_after, bv, false);
+        }
+        dst.wv = wv;
+        dst.bv = bv;
 
         self.ply += 1;
     }
@@ -364,6 +452,37 @@ mod tests {
                 "accumulator mismatch after {m} from {fen}",
             );
             board.unmake_move(m, undo);
+        }
+    }
+
+    // Long games through one stack, so cached refreshes build on earlier ones.
+    #[test]
+    fn cached_refresh_matches_recompute_over_long_games() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "8/5k2/3p4/1p1Pp2p/pP2Pp1P/P4P1K/8/8 b - - 0 1",
+            "r6r/1k6/8/8/8/8/5K2/7R w - - 0 1",
+        ];
+        for fen in fens {
+            let mut board = Board::from_fen(fen).unwrap();
+            let mut accs = AccStack::new();
+            accs.init(&board);
+            for ply in 0..200 {
+                let mut list = MoveList::new();
+                board.gen_legal_into(&mut list);
+                if list.len() == 0 {
+                    break;
+                }
+                let m = list.get((ply * 7 + 3) % list.len());
+                let undo = board.make_move(m);
+                accs.push_after(&board, m, &undo);
+                let fresh = Accumulator::recompute(&board);
+                let inc = &accs.stack[accs.ply];
+                assert!(inc.white == fresh.white && inc.black == fresh.black, "mismatch after {m} at ply {ply} from {fen}");
+                // Keep the stack shallow; the board walks on.
+                accs.stack[0] = accs.stack[accs.ply].clone();
+                accs.ply = 0;
+            }
         }
     }
 

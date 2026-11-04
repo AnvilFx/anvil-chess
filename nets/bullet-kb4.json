@@ -1,0 +1,17 @@
+{
+  "n_hidden": 512,
+  "buckets": 8,
+  "head_scale": 400,
+  "activation": "screlu",
+  "king_buckets": [0, 0, 1, 1,
+                   2, 2, 2, 2,
+                   2, 2, 2, 2,
+                   3, 3, 3, 3,
+                   3, 3, 3, 3,
+                   3, 3, 3, 3,
+                   3, 3, 3, 3,
+                   3, 3, 3, 3],
+  "mirrored": true,
+  "scale": 400.0,
+  "layout": "bullet anvil.rs: l0w[768*4*N] (factoriser folded in) l0b[N] l1w[B][2N] l1b[B] (f32 LE, padded to 64 bytes)"
+}
