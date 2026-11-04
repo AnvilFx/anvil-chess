@@ -1180,11 +1180,17 @@ fn negamax(
     let mut searched_quiets: [Move; 64] = [Move(0); 64];
     let mut sq_n: usize = 0;
 
-    for i in 0..sm.len {
-        if i == 1 && sm.deferred {
+    // Quiets dropped once pruning covers them all; they still count toward the move index.
+    let mut skipped = 0usize;
+    for slot in 0.. {
+        if slot >= sm.len {
+            break;
+        }
+        if slot == 1 && sm.deferred {
             sm.score_deferred(board, ctx, ply_us);
         }
-        let (m, move_score) = sm.pop_best(i);
+        let i = slot + skipped;
+        let (m, move_score) = sm.pop_best(slot);
         if Some(m) == excluded {
             continue;
         }
@@ -1196,12 +1202,14 @@ fn negamax(
                 && depth <= p.lmp_max_depth as u32
                 && i as i32 >= (p.lmp_base + (depth as i32) * (depth as i32)) / (2 - improving as i32)
             {
+                skipped += sm.drop_quiets_after(slot);
                 continue;
             }
             if is_quiet
                 && depth <= p.fp_max_depth as u32
                 && eval.map_or(false, |ev| ev + p.fp_margin * depth as i32 <= alpha)
             {
+                skipped += sm.drop_quiets_after(slot);
                 continue;
             }
             if depth <= p.see_max_depth as u32 {
@@ -1667,9 +1675,9 @@ impl ScoredMoves {
         }
     }
 
-    // Like from_list, but when the TT move is present it is put first right away (as
-    // pop_best(0) would) and the captures' SEE scores wait for score_deferred, since
-    // the TT move often cuts. SEE reads only the board, so the scores are unchanged.
+    // Like from_list, but the TT move goes first right away (as pop_best(0) would) and
+    // the rest wait for score_deferred, since the TT move often cuts. Without a TT move
+    // only the captures' SEE scores wait.
     fn tt_move_first(list: &MoveList, board: &Board, tt_move: Option<Move>, ctx: &SearchCtx, ply: usize) -> Self {
         let mut sm = Self::empty();
         let mut tt_idx = None;
@@ -1678,7 +1686,7 @@ impl ScoredMoves {
             let s = if Some(m) == tt_move {
                 tt_idx = Some(i);
                 2_000_000
-            } else if m.is_capture() {
+            } else if m.is_capture() || tt_move.is_some() {
                 0
             } else {
                 score_move(m, board, None, tt_move, ctx, ply)
@@ -1692,20 +1700,20 @@ impl ScoredMoves {
             }
             None => {
                 sm.deferred = true;
-                sm.score_deferred_from(0, board, ctx, ply);
+                sm.score_deferred_from(0, tt_move.is_some(), board, ctx, ply);
             }
         }
         sm
     }
 
     fn score_deferred(&mut self, board: &Board, ctx: &SearchCtx, ply: usize) {
-        self.score_deferred_from(1, board, ctx, ply);
+        self.score_deferred_from(1, true, board, ctx, ply);
     }
 
-    fn score_deferred_from(&mut self, start: usize, board: &Board, ctx: &SearchCtx, ply: usize) {
+    fn score_deferred_from(&mut self, start: usize, quiets: bool, board: &Board, ctx: &SearchCtx, ply: usize) {
         for i in start..self.len {
             let (m, _) = unsafe { self.data[i].assume_init() };
-            if m.is_capture() {
+            if quiets || m.is_capture() {
                 self.data[i] = MaybeUninit::new((m, score_move(m, board, None, None, ctx, ply)));
             }
         }
@@ -1736,6 +1744,21 @@ impl ScoredMoves {
             sm.data[i] = MaybeUninit::new((m, score_move(m, board, pv, tt_move, ctx, ply)));
         }
         sm
+    }
+
+    /// Removes the quiets after `start`, keeping the others in order; returns how many went.
+    fn drop_quiets_after(&mut self, start: usize) -> usize {
+        let mut w = start + 1;
+        for r in start + 1..self.len {
+            let e = unsafe { self.data[r].assume_init() };
+            if e.0.is_capture() || e.0.is_promotion() {
+                self.data[w] = MaybeUninit::new(e);
+                w += 1;
+            }
+        }
+        let dropped = self.len - w;
+        self.len = w;
+        dropped
     }
 
     fn pop_best(&mut self, start: usize) -> (Move, i32) {
