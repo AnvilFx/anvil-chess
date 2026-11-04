@@ -24,6 +24,14 @@ Banksia, fastchess, ...).
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
 
+## Downloads
+
+Binaries for Windows and Linux are on the
+[releases page](https://github.com/AnvilFx/anvil-chess/releases):
+
+- `x86-64-v3`: CPUs with AVX2 (Intel Haswell / AMD Zen and newer). Use this one if it runs.
+- `x86-64-v2`: older x86-64 CPUs.
+
 ## Building
 
 Requires a recent stable Rust toolchain.

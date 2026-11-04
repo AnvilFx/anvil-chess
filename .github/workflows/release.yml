@@ -1,0 +1,44 @@
+# Builds the engine for each published release and attaches the binaries to it.
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows, ext: .exe }
+          - { os: ubuntu-latest, platform: linux, ext: "" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test
+        shell: bash
+        run: cargo test --release
+        env:
+          RUSTFLAGS: -C target-cpu=x86-64-v2
+
+      # RUSTFLAGS overrides target-cpu=native from .cargo/config.toml.
+      - name: Build
+        shell: bash
+        run: |
+          mkdir dist
+          version="${GITHUB_REF_NAME#v}"
+          for level in v3 v2; do
+            RUSTFLAGS="-C target-cpu=x86-64-$level" cargo build --release
+            cp "target/release/anvil-engine${{ matrix.ext }}" \
+              "dist/anvil-$version-${{ matrix.platform }}-x86-64-$level${{ matrix.ext }}"
+          done
+
+      - name: Upload
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
