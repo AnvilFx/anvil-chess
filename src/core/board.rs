@@ -155,9 +155,7 @@ impl Board {
 
     pub fn from_fen(fen: &str) -> Result<Self, String> {
         let mut parts = fen.split_whitespace();
-        let board_part = parts
-            .next()
-            .ok_or_else(|| "FEN missing piece-placement field".to_string())?;
+        let board_part = parts.next().ok_or_else(|| "FEN missing piece-placement field".to_string())?;
 
         let mut board = Self::empty();
 
@@ -167,11 +165,7 @@ impl Board {
         for ch in board_part.chars() {
             if ch == '/' {
                 if file != 8 {
-                    return Err(format!(
-                        "rank {} ended with {} files (expected 8)",
-                        rank + 1,
-                        file
-                    ));
+                    return Err(format!("rank {} ended with {} files (expected 8)", rank + 1, file));
                 }
                 rank -= 1;
                 file = 0;
@@ -191,11 +185,7 @@ impl Board {
                 continue;
             }
             if file >= 8 {
-                return Err(format!(
-                    "piece '{}' on rank {} past file h",
-                    ch,
-                    rank + 1
-                ));
+                return Err(format!("piece '{}' on rank {} past file h", ch, rank + 1));
             }
             let (color, kind) = match ch {
                 'P' => (Color::White, PieceKind::Pawn),
@@ -212,18 +202,11 @@ impl Board {
                 'k' => (Color::Black, PieceKind::King),
                 _ => return Err(format!("unrecognized piece character '{}'", ch)),
             };
-            board.set_square(
-                Square::new(file, rank as u8),
-                Some(Piece { color, kind }),
-            );
+            board.set_square(Square::new(file, rank as u8), Some(Piece { color, kind }));
             file += 1;
         }
         if rank != 0 || file != 8 {
-            return Err(format!(
-                "incomplete board (last rank index = {}, files filled = {})",
-                rank + 1,
-                file
-            ));
+            return Err(format!("incomplete board (last rank index = {}, files filled = {})", rank + 1, file));
         }
 
         match parts.next() {
@@ -243,12 +226,7 @@ impl Board {
                         'Q' => rights.add(CastleRights::WHITE_QUEEN),
                         'k' => rights.add(CastleRights::BLACK_KING),
                         'q' => rights.add(CastleRights::BLACK_QUEEN),
-                        _ => {
-                            return Err(format!(
-                                "bad castle-rights character '{}'",
-                                ch
-                            ))
-                        }
+                        _ => return Err(format!("bad castle-rights character '{}'", ch)),
                     }
                 }
                 board.castle = rights;
@@ -259,12 +237,10 @@ impl Board {
         match parts.next() {
             Some("-") => board.en_passant = None,
             Some(s) => {
-                let sq = Square::from_algebraic(s)
-                    .ok_or_else(|| format!("bad en-passant square '{}'", s))?;
+                let sq = Square::from_algebraic(s).ok_or_else(|| format!("bad en-passant square '{}'", s))?;
                 // Same rule as make_move: only kept when a pawn can take on it.
                 let stm = board.side_to_move;
-                let takers = PAWN_ATTACKS[stm.opp().idx()][sq.idx()]
-                    & board.piece_bb[stm.idx()][PieceKind::Pawn.idx()];
+                let takers = PAWN_ATTACKS[stm.opp().idx()][sq.idx()] & board.piece_bb[stm.idx()][PieceKind::Pawn.idx()];
                 board.en_passant = (takers != 0).then_some(sq);
             }
             None => return Err("FEN missing en-passant field".into()),
@@ -272,18 +248,14 @@ impl Board {
 
         match parts.next() {
             Some(s) => {
-                board.halfmove_clock = s
-                    .parse()
-                    .map_err(|_| format!("bad halfmove clock '{}'", s))?;
+                board.halfmove_clock = s.parse().map_err(|_| format!("bad halfmove clock '{}'", s))?;
             }
             None => return Err("FEN missing halfmove-clock field".into()),
         }
 
         match parts.next() {
             Some(s) => {
-                board.fullmove_number = s
-                    .parse()
-                    .map_err(|_| format!("bad fullmove number '{}'", s))?;
+                board.fullmove_number = s.parse().map_err(|_| format!("bad fullmove number '{}'", s))?;
             }
             None => return Err("FEN missing fullmove-number field".into()),
         }
@@ -369,13 +341,9 @@ impl Board {
         atk |= PAWN_ATTACKS[opp][sq.idx()] & self.piece_bb[c][PieceKind::Pawn.idx()];
         atk |= KNIGHT_ATTACKS[sq.idx()] & self.piece_bb[c][PieceKind::Knight.idx()];
         let diag = bishop_attacks(sq, self.occupancy);
-        atk |= diag
-            & (self.piece_bb[c][PieceKind::Bishop.idx()]
-                | self.piece_bb[c][PieceKind::Queen.idx()]);
+        atk |= diag & (self.piece_bb[c][PieceKind::Bishop.idx()] | self.piece_bb[c][PieceKind::Queen.idx()]);
         let orth = rook_attacks(sq, self.occupancy);
-        atk |= orth
-            & (self.piece_bb[c][PieceKind::Rook.idx()]
-                | self.piece_bb[c][PieceKind::Queen.idx()]);
+        atk |= orth & (self.piece_bb[c][PieceKind::Rook.idx()] | self.piece_bb[c][PieceKind::Queen.idx()]);
         atk |= KING_ATTACKS[sq.idx()] & self.piece_bb[c][PieceKind::King.idx()];
 
         atk
@@ -402,10 +370,7 @@ impl Board {
         let flag = m.flag();
         let stm = self.side_to_move;
 
-        let moving_kind = self
-            .piece_at(from)
-            .expect("make_move: from-square is empty")
-            .kind;
+        let moving_kind = self.piece_at(from).expect("make_move: from-square is empty").kind;
 
         let ep_capture = flag == Move::EP_CAPTURE;
         let captured_sq = if ep_capture {
@@ -416,11 +381,7 @@ impl Board {
         } else {
             to
         };
-        let captured = if m.is_capture() {
-            self.piece_at(captured_sq)
-        } else {
-            None
-        };
+        let captured = if m.is_capture() { self.piece_at(captured_sq) } else { None };
 
         let undo = UndoInfo {
             captured,
@@ -554,10 +515,7 @@ impl Board {
             self.remove_piece(to, stm, promo);
             self.add_piece(from, stm, PieceKind::Pawn);
         } else {
-            let moving_kind = self
-                .piece_at(to)
-                .expect("unmake: to-square is empty")
-                .kind;
+            let moving_kind = self.piece_at(to).expect("unmake: to-square is empty").kind;
             self.move_piece(to, from, stm, moving_kind);
         }
 
@@ -578,11 +536,7 @@ impl Board {
 
     /// The side to move must not be in check.
     pub fn make_null_move(&mut self) -> NullUndo {
-        let undo = NullUndo {
-            en_passant: self.en_passant,
-            halfmove_clock: self.halfmove_clock,
-            hash: self.hash,
-        };
+        let undo = NullUndo { en_passant: self.en_passant, halfmove_clock: self.halfmove_clock, hash: self.hash };
         self.hash ^= zob_meta(self.side_to_move, self.castle, self.en_passant);
         self.en_passant = None;
         self.halfmove_clock = self.halfmove_clock.saturating_add(1);
@@ -721,13 +675,11 @@ impl Board {
         while let Some(sq) = pop_lsb(&mut n) {
             danger |= KNIGHT_ATTACKS[sq.idx()];
         }
-        let mut bq = self.piece_bb[opp_idx][PieceKind::Bishop.idx()]
-            | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
+        let mut bq = self.piece_bb[opp_idx][PieceKind::Bishop.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
         while let Some(sq) = pop_lsb(&mut bq) {
             danger |= bishop_attacks(sq, occ_no_king);
         }
-        let mut rq = self.piece_bb[opp_idx][PieceKind::Rook.idx()]
-            | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
+        let mut rq = self.piece_bb[opp_idx][PieceKind::Rook.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
         while let Some(sq) = pop_lsb(&mut rq) {
             danger |= rook_attacks(sq, occ_no_king);
         }
@@ -754,13 +706,7 @@ impl Board {
             _ => 0u64,
         };
 
-        CheckInfo {
-            king_sq,
-            checkers,
-            check_mask,
-            pin_ray: self.pin_rays(stm, king_sq),
-            danger,
-        }
+        CheckInfo { king_sq, checkers, check_mask, pin_ray: self.pin_rays(stm, king_sq), danger }
     }
 
     /// Check info for a side known not to be in check, without the king danger map.
@@ -773,19 +719,15 @@ impl Board {
         let opp_idx = stm.opp().idx();
         let own_bb = self.color_bb[stm.idx()];
         let mut pin_ray = [!0u64; 64];
-        let bishop_q = self.piece_bb[opp_idx][PieceKind::Bishop.idx()]
-            | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
-        let rook_q = self.piece_bb[opp_idx][PieceKind::Rook.idx()]
-            | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
-        let mut snipers = (bishop_q & bishop_attacks(king_sq, 0))
-            | (rook_q & rook_attacks(king_sq, 0));
+        let bishop_q = self.piece_bb[opp_idx][PieceKind::Bishop.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
+        let rook_q = self.piece_bb[opp_idx][PieceKind::Rook.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
+        let mut snipers = (bishop_q & bishop_attacks(king_sq, 0)) | (rook_q & rook_attacks(king_sq, 0));
         while let Some(sniper_sq) = pop_lsb(&mut snipers) {
             let between = BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] & self.occupancy;
             if between.count_ones() == 1 {
                 let pinned_sq = lsb(between);
                 if pinned_sq.bb() & own_bb != 0 {
-                    pin_ray[pinned_sq.idx()] =
-                        BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] | sniper_sq.bb();
+                    pin_ray[pinned_sq.idx()] = BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] | sniper_sq.bb();
                 }
             }
         }
@@ -810,10 +752,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut bishops) {
-            let targets = bishop_attacks(from, self.occupancy)
-                & !own
-                & info.check_mask
-                & info.pin_ray[from.idx()];
+            let targets = bishop_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -823,10 +762,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut rooks) {
-            let targets = rook_attacks(from, self.occupancy)
-                & !own
-                & info.check_mask
-                & info.pin_ray[from.idx()];
+            let targets = rook_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -836,10 +772,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut queens) {
-            let targets = queen_attacks(from, self.occupancy)
-                & !own
-                & info.check_mask
-                & info.pin_ray[from.idx()];
+            let targets = queen_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -925,10 +858,7 @@ impl Board {
                         if (0..64).contains(&dbl_idx) {
                             let dbl = Square(dbl_idx as u8);
                             let dbl_bb = dbl.bb();
-                            if empty & dbl_bb != 0
-                                && pin & dbl_bb != 0
-                                && info.check_mask & dbl_bb != 0
-                            {
+                            if empty & dbl_bb != 0 && pin & dbl_bb != 0 && info.check_mask & dbl_bb != 0 {
                                 out.push(Move::new(from, dbl, Move::DOUBLE_PUSH));
                             }
                         }
@@ -1010,10 +940,7 @@ impl Board {
             Color::White => Square(to.0 - 8),
             Color::Black => Square(to.0 + 8),
         };
-        if info.checkers != 0
-            && info.check_mask & to.bb() == 0
-            && info.check_mask & captured_sq.bb() == 0
-        {
+        if info.checkers != 0 && info.check_mask & to.bb() == 0 && info.check_mask & captured_sq.bb() == 0 {
             return false;
         }
         let mut test = self.clone();
@@ -1099,31 +1026,19 @@ mod tests {
     fn set_square_updates_bitboards_and_mailbox_in_sync() {
         let mut board = Board::empty();
         let e1 = Square::new(4, 0);
-        let king = Piece {
-            color: Color::White,
-            kind: PieceKind::King,
-        };
+        let king = Piece { color: Color::White, kind: PieceKind::King };
 
         board.set_square(e1, Some(king));
         assert_eq!(board.piece_at(e1), Some(king));
         assert_eq!(board.occupancy, e1.bb());
         assert_eq!(board.color_bb[Color::White.idx()], e1.bb());
         assert_eq!(board.color_bb[Color::Black.idx()], 0);
-        assert_eq!(
-            board.piece_bb[Color::White.idx()][PieceKind::King.idx()],
-            e1.bb()
-        );
+        assert_eq!(board.piece_bb[Color::White.idx()][PieceKind::King.idx()], e1.bb());
 
-        let bk = Piece {
-            color: Color::Black,
-            kind: PieceKind::Knight,
-        };
+        let bk = Piece { color: Color::Black, kind: PieceKind::Knight };
         board.set_square(e1, Some(bk));
         assert_eq!(board.piece_at(e1), Some(bk));
-        assert_eq!(
-            board.piece_bb[Color::White.idx()][PieceKind::King.idx()],
-            0
-        );
+        assert_eq!(board.piece_bb[Color::White.idx()][PieceKind::King.idx()], 0);
         assert_eq!(board.color_bb[Color::White.idx()], 0);
         assert_eq!(board.color_bb[Color::Black.idx()], e1.bb());
 
@@ -1138,16 +1053,8 @@ mod tests {
         assert_eq!(board.occupancy.count_ones(), 32);
         assert_eq!(board.color_bb[Color::White.idx()].count_ones(), 16);
         assert_eq!(board.color_bb[Color::Black.idx()].count_ones(), 16);
-        assert_eq!(
-            board.piece_bb[Color::White.idx()][PieceKind::Pawn.idx()]
-                .count_ones(),
-            8
-        );
-        assert_eq!(
-            board.piece_bb[Color::Black.idx()][PieceKind::Pawn.idx()]
-                .count_ones(),
-            8
-        );
+        assert_eq!(board.piece_bb[Color::White.idx()][PieceKind::Pawn.idx()].count_ones(), 8);
+        assert_eq!(board.piece_bb[Color::Black.idx()][PieceKind::Pawn.idx()].count_ones(), 8);
         let wk = board.piece_bb[Color::White.idx()][PieceKind::King.idx()];
         assert_eq!(wk, Square::new(4, 0).bb());
     }
@@ -1179,14 +1086,8 @@ mod tests {
     fn fen_rejects_bad_input() {
         assert!(Board::from_fen("").is_err());
         assert!(Board::from_fen("garbage").is_err());
-        assert!(Board::from_fen(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -"
-        )
-        .is_err());
-        assert!(Board::from_fen(
-            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNX w KQkq - 0 1"
-        )
-        .is_err());
+        assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -").is_err());
+        assert!(Board::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNX w KQkq - 0 1").is_err());
     }
 
     #[test]
@@ -1260,9 +1161,7 @@ mod tests {
     fn king_attacks_corner_and_center() {
         // King on a1 attacks a2, b1, b2 (3 squares).
         let a1 = KING_ATTACKS[Square::new(0, 0).idx()];
-        let expected = Square::new(0, 1).bb()
-            | Square::new(1, 0).bb()
-            | Square::new(1, 1).bb();
+        let expected = Square::new(0, 1).bb() | Square::new(1, 0).bb() | Square::new(1, 1).bb();
         assert_eq!(a1, expected);
         assert_eq!(a1.count_ones(), 3);
 
@@ -1351,12 +1250,16 @@ mod tests {
                 assert_eq!(
                     bishop_attacks(sq, occ),
                     bishop_attacks_raycast(sq, occ),
-                    "bishop mismatch at sq={} occ={:x}", sq_idx, occ
+                    "bishop mismatch at sq={} occ={:x}",
+                    sq_idx,
+                    occ
                 );
                 assert_eq!(
                     rook_attacks(sq, occ),
                     rook_attacks_raycast(sq, occ),
-                    "rook mismatch at sq={} occ={:x}", sq_idx, occ
+                    "rook mismatch at sq={} occ={:x}",
+                    sq_idx,
+                    occ
                 );
             }
         }
@@ -1366,10 +1269,10 @@ mod tests {
     fn bishop_attacks_with_blocker() {
         let occ = Square::new(2, 2).bb();
         let attacks = bishop_attacks(Square::new(0, 0), occ);
-        assert!(attacks & Square::new(1, 1).bb() != 0);  // b2
-        assert!(attacks & Square::new(2, 2).bb() != 0);  // c3
-        assert!(attacks & Square::new(3, 3).bb() == 0);  // d4
-        assert!(attacks & Square::new(7, 7).bb() == 0);  // h8
+        assert!(attacks & Square::new(1, 1).bb() != 0); // b2
+        assert!(attacks & Square::new(2, 2).bb() != 0); // c3
+        assert!(attacks & Square::new(3, 3).bb() == 0); // d4
+        assert!(attacks & Square::new(7, 7).bb() == 0); // h8
     }
 
     #[test]
@@ -1402,12 +1305,7 @@ mod tests {
         for m in moves {
             let undo = board.make_move(m);
             board.unmake_move(m, undo);
-            assert_eq!(
-                board.to_fen(),
-                original_fen,
-                "make/unmake didn't restore state for move {}",
-                m
-            );
+            assert_eq!(board.to_fen(), original_fen, "make/unmake didn't restore state for move {}", m);
         }
     }
 
@@ -1462,10 +1360,7 @@ mod tests {
         let m = Move::new(from, to, Move::EP_CAPTURE);
         let undo = board.make_move(m);
         assert_eq!(board.piece_at(Square::new(4, 3)), None);
-        assert_eq!(
-            undo.captured,
-            Some(Piece { color: Color::White, kind: PieceKind::Pawn })
-        );
+        assert_eq!(undo.captured, Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
         board.unmake_move(m, undo);
         assert_eq!(board.to_fen(), fen);
     }
@@ -1476,14 +1371,8 @@ mod tests {
         let mut board = Board::from_fen(fen).unwrap();
         let m = Move::new(Square(4), Square(6), Move::CASTLE_KING); // e1g1
         let undo = board.make_move(m);
-        assert_eq!(
-            board.piece_at(Square(6)),
-            Some(Piece { color: Color::White, kind: PieceKind::King })
-        );
-        assert_eq!(
-            board.piece_at(Square(5)),
-            Some(Piece { color: Color::White, kind: PieceKind::Rook })
-        );
+        assert_eq!(board.piece_at(Square(6)), Some(Piece { color: Color::White, kind: PieceKind::King }));
+        assert_eq!(board.piece_at(Square(5)), Some(Piece { color: Color::White, kind: PieceKind::Rook }));
         assert_eq!(board.piece_at(Square(4)), None);
         assert_eq!(board.piece_at(Square(7)), None);
         assert!(!board.castle.has(CastleRights::WHITE_KING));
@@ -1498,15 +1387,9 @@ mod tests {
         let mut board = Board::from_fen(fen).unwrap();
         let m = Move::new(Square::new(0, 6), Square::new(0, 7), Move::PROMO_QUEEN);
         let undo = board.make_move(m);
-        assert_eq!(
-            board.piece_at(Square::new(0, 7)),
-            Some(Piece { color: Color::White, kind: PieceKind::Queen })
-        );
+        assert_eq!(board.piece_at(Square::new(0, 7)), Some(Piece { color: Color::White, kind: PieceKind::Queen }));
         board.unmake_move(m, undo);
-        assert_eq!(
-            board.piece_at(Square::new(0, 6)),
-            Some(Piece { color: Color::White, kind: PieceKind::Pawn })
-        );
+        assert_eq!(board.piece_at(Square::new(0, 6)), Some(Piece { color: Color::White, kind: PieceKind::Pawn }));
         assert_eq!(board.piece_at(Square::new(0, 7)), None);
     }
 
@@ -1515,10 +1398,7 @@ mod tests {
         let fen = "5rk1/8/8/8/8/8/8/4K2R w K - 0 1";
         let mut board = Board::from_fen(fen).unwrap();
         let moves = board.generate_legal_moves();
-        assert!(
-            !moves.iter().any(|m| m.is_castle()),
-            "kingside castling should be blocked (king passes through f1)"
-        );
+        assert!(!moves.iter().any(|m| m.is_castle()), "kingside castling should be blocked (king passes through f1)");
     }
 
     #[test]
@@ -1661,10 +1541,7 @@ mod tests {
             for uci in ucis {
                 let mut ml = MoveList::new();
                 b.gen_legal_into(&mut ml);
-                let m = (0..ml.len())
-                    .map(|i| ml.get(i))
-                    .find(|m| m.to_string() == *uci)
-                    .unwrap();
+                let m = (0..ml.len()).map(|i| ml.get(i)).find(|m| m.to_string() == *uci).unwrap();
                 b.make_move(m);
             }
             b
@@ -1697,10 +1574,7 @@ mod tests {
         let mut board = Board::from_fen("rnbqkbnr/ppp1pppp/8/8/3p4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1").unwrap();
         let mut ml = MoveList::new();
         board.gen_legal_into(&mut ml);
-        let e2e4 = (0..ml.len())
-            .map(|i| ml.get(i))
-            .find(|m| m.to_string() == "e2e4")
-            .unwrap();
+        let e2e4 = (0..ml.len()).map(|i| ml.get(i)).find(|m| m.to_string() == "e2e4").unwrap();
         board.make_move(e2e4);
         assert!(board.en_passant.is_some(), "e2e4 should set ep target");
         let undo = board.make_null_move();
@@ -1709,4 +1583,3 @@ mod tests {
         assert!(board.en_passant.is_some(), "unmake restores ep");
     }
 }
-

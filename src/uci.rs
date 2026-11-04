@@ -1,7 +1,5 @@
 use crate::core::{Board, Color, Move, MoveList, PieceKind, Square};
-use crate::search::{
-    Engine, IterInfo, Limits, MATE_SCORE, MATE_THRESHOLD, PARAM_SPECS, TT_DEFAULT_MB, TT_MAX_MB,
-};
+use crate::search::{Engine, IterInfo, Limits, MATE_SCORE, MATE_THRESHOLD, PARAM_SPECS, TT_DEFAULT_MB, TT_MAX_MB};
 use crate::timeman::{self, GoLimits};
 use std::io::{self, BufRead, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,14 +27,11 @@ pub fn run() {
 
         match cmd {
             "uci" => {
-                println!("id name Anvil");
-                println!("id author Anvil contributors");
+                println!("id name Anvil {}", env!("CARGO_PKG_VERSION"));
+                println!("id author AnvilFx");
                 println!("option name Hash type spin default {TT_DEFAULT_MB} min 1 max {TT_MAX_MB}");
                 for s in PARAM_SPECS {
-                    println!(
-                        "option name {} type spin default {} min {} max {}",
-                        s.name, s.default, s.min, s.max
-                    );
+                    println!("option name {} type spin default {} min {} max {}", s.name, s.default, s.min, s.max);
                 }
                 println!("uciok");
             }

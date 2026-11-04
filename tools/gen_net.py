@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # Quantize a trained f32 net into the engine's self-describing net.nnue.
 #
-# Input (f32 LE), K king buckets, B output buckets (1 for the original nnue63m.bin):
+# Input (f32 LE), K king buckets, B output buckets:
 #   ft_weights[768*K*N] ft_bias[N] head_weights[B][2N] head_bias[B]
-# This is also bullet's layout when l1w is saved transposed (bullet/examples/anvil.rs).
+# This is also bullet's layout when l1w is saved transposed (tools/train/anvil.rs).
 # The json gives n_hidden, plus optional "buckets" (default 1) and "head_scale"
 # (default 1; 400 for bullet nets, whose output is in eval-scale units, not cp).
 # The engine applies head_scale after the dot product, so i8 head weights keep
@@ -24,7 +24,7 @@
 # needs N_HIDDEN / N_BUCKETS in src/eval/params.rs; the loader asserts a match.
 #
 # Usage (run from the project root):
-#   python tools/gen_net.py nets/nnue63m.bin nets/nnue63m.json src/eval/net.nnue
+#   python tools/gen_net.py nets/bullet-kb4-397m.bin nets/bullet-kb4.json src/eval/net.nnue
 
 import argparse
 import json

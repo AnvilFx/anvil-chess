@@ -1,6 +1,0 @@
-{
-  "n_hidden": 512,
-  "scale": 400.0,
-  "lambda": 0.7,
-  "layout": "ft_weights[768*N] ft_bias[N] head_weights[2*N] head_bias[1] (f32 LE)"
-}

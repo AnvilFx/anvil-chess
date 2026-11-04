@@ -21,10 +21,7 @@ const fn knight_attacks_from(sq: u8) -> u64 {
     let rank = (sq / 8) as i8;
     let file = (sq % 8) as i8;
     let mut bb = 0u64;
-    let deltas: [(i8, i8); 8] = [
-        (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-        (1, -2),  (1, 2),  (2, -1),  (2, 1),
-    ];
+    let deltas: [(i8, i8); 8] = [(-2, -1), (-2, 1), (-1, -2), (-1, 2), (1, -2), (1, 2), (2, -1), (2, 1)];
     let mut i = 0;
     while i < 8 {
         let (df, dr) = deltas[i];
@@ -128,10 +125,7 @@ const fn between_bb_calc(from: u8, to: u8) -> u64 {
     } else if dr == 0 {
         (if df > 0 { 1i8 } else { -1i8 }, 0i8)
     } else if (if df > 0 { df } else { -df }) == (if dr > 0 { dr } else { -dr }) {
-        (
-            if df > 0 { 1i8 } else { -1i8 },
-            if dr > 0 { 1i8 } else { -1i8 },
-        )
+        (if df > 0 { 1i8 } else { -1i8 }, if dr > 0 { 1i8 } else { -1i8 })
     } else {
         return 0;
     };
@@ -147,7 +141,7 @@ const fn between_bb_calc(from: u8, to: u8) -> u64 {
 }
 
 /// Squares strictly between `a` and `b` on a shared line; zero if not aligned.
-pub(crate) const BETWEEN_BB: [[u64; 64]; 64] = {
+pub(crate) static BETWEEN_BB: [[u64; 64]; 64] = {
     let mut arr = [[0u64; 64]; 64];
     let mut i = 0;
     while i < 64 {
@@ -168,7 +162,7 @@ fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     for &(df, dr) in directions {
         let mut f = file0 + df;
         let mut r = rank0 + dr;
-        while f >= 0 && f < 8 && r >= 0 && r < 8 {
+        while (0..8).contains(&f) && (0..8).contains(&r) {
             let target = (r as u8) * 8 + (f as u8);
             let bit = 1u64 << target;
             attacks |= bit;
@@ -286,9 +280,7 @@ pub(crate) struct XorShift64 {
 
 impl XorShift64 {
     pub(crate) fn new(seed: u64) -> Self {
-        Self {
-            state: if seed == 0 { 1 } else { seed },
-        }
+        Self { state: if seed == 0 { 1 } else { seed } }
     }
     pub(crate) fn next(&mut self) -> u64 {
         let mut x = self.state;
@@ -308,11 +300,8 @@ fn find_magic_for_sq(sq: u8, mask: u64, is_bishop: bool, rng: &mut XorShift64) -
     let mut subsets: Vec<(u64, u64)> = Vec::with_capacity(n_entries);
     let mut sub = 0u64;
     loop {
-        let attack = if is_bishop {
-            bishop_attacks_raycast(Square(sq), sub)
-        } else {
-            rook_attacks_raycast(Square(sq), sub)
-        };
+        let attack =
+            if is_bishop { bishop_attacks_raycast(Square(sq), sub) } else { rook_attacks_raycast(Square(sq), sub) };
         subsets.push((sub, attack));
         // Carry-Rippler: next subset of `mask`.
         sub = sub.wrapping_sub(mask) & mask;
@@ -357,17 +346,8 @@ fn build_magic_table(is_bishop: bool) -> MagicTable {
     for sq in 0..64u8 {
         let mask = if is_bishop { bishop_mask(sq) } else { rook_mask(sq) };
         let (magic, sub_table) = find_magic_for_sq(sq, mask, is_bishop, &mut rng);
-        entries[sq as usize] = MagicEntry {
-            mask,
-            magic,
-            offset: table.len(),
-            shift: 64 - mask.count_ones(),
-        };
+        entries[sq as usize] = MagicEntry { mask, magic, offset: table.len(), shift: 64 - mask.count_ones() };
         table.extend(sub_table);
     }
-    MagicTable {
-        entries,
-        table: table.into_boxed_slice(),
-    }
+    MagicTable { entries, table: table.into_boxed_slice() }
 }
-

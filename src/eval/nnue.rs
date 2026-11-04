@@ -7,8 +7,11 @@ use crate::core::{Board, Color, Move, PieceKind, Square, UndoInfo};
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,avxvnni")]
 unsafe fn head_dot_vnni(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDDEN],
-    qa: i16, head_bias: i32,
+    us: &[i16; N_HIDDEN],
+    them: &[i16; N_HIDDEN],
+    head: &[i8; 2 * N_HIDDEN],
+    qa: i16,
+    head_bias: i32,
 ) -> i32 {
     use std::arch::x86_64::*;
     let mut act = [0u8; 2 * N_HIDDEN];
@@ -42,8 +45,11 @@ unsafe fn head_dot_vnni(
 
 #[inline]
 fn head_dot_scalar(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDDEN],
-    qa: i16, head_bias: i32,
+    us: &[i16; N_HIDDEN],
+    them: &[i16; N_HIDDEN],
+    head: &[i8; 2 * N_HIDDEN],
+    qa: i16,
+    head_bias: i32,
 ) -> i32 {
     let mut sum: i32 = head_bias;
     for h in 0..N_HIDDEN {
@@ -54,10 +60,7 @@ fn head_dot_scalar(
 }
 
 #[inline]
-fn head_dot(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDDEN],
-    qa: i16, head_bias: i32,
-) -> i32 {
+fn head_dot(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDDEN], qa: i16, head_bias: i32) -> i32 {
     #[cfg(target_arch = "x86_64")]
     {
         if std::is_x86_feature_detected!("avxvnni") {
@@ -71,9 +74,7 @@ fn head_dot(
 // i32 lane gathers 128 terms, so lanes can't overflow; the total needs i64.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn screlu_dot_avx2(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
-) -> i64 {
+unsafe fn screlu_dot_avx2(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16) -> i64 {
     use std::arch::x86_64::*;
     let zero = _mm256_setzero_si256();
     let max = _mm256_set1_epi16(qa);
@@ -93,9 +94,7 @@ unsafe fn screlu_dot_avx2(
 }
 
 #[inline]
-fn screlu_dot_scalar(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
-) -> i64 {
+fn screlu_dot_scalar(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16) -> i64 {
     let mut sum = 0i64;
     for h in 0..N_HIDDEN {
         let (a, b) = (us[h].clamp(0, qa) as i64, them[h].clamp(0, qa) as i64);
@@ -105,12 +104,10 @@ fn screlu_dot_scalar(
 }
 
 #[inline]
-fn screlu_dot(
-    us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16,
-) -> i64 {
+fn screlu_dot(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16) -> i64 {
     #[cfg(target_arch = "x86_64")]
     {
-        if N_HIDDEN % 16 == 0 && std::is_x86_feature_detected!("avx2") {
+        if N_HIDDEN.is_multiple_of(16) && std::is_x86_feature_detected!("avx2") {
             return unsafe { screlu_dot_avx2(us, them, head, qa) };
         }
     }
@@ -203,16 +200,16 @@ fn refresh_cached(entry: &mut CacheEntry, board: &Board, view: KingView, white_v
             while added != 0 {
                 let r = row(added.trailing_zeros() as usize);
                 added &= added - 1;
-                for h in 0..N_HIDDEN {
-                    entry.acc[h] = entry.acc[h].wrapping_add(r[h]);
+                for (a, &w) in entry.acc.iter_mut().zip(r) {
+                    *a = a.wrapping_add(w);
                 }
             }
             let mut removed = old & !now;
             while removed != 0 {
                 let r = row(removed.trailing_zeros() as usize);
                 removed &= removed - 1;
-                for h in 0..N_HIDDEN {
-                    entry.acc[h] = entry.acc[h].wrapping_sub(r[h]);
+                for (a, &w) in entry.acc.iter_mut().zip(r) {
+                    *a = a.wrapping_sub(w);
                 }
             }
             entry.pieces[color_idx][kind_idx] = now;
@@ -224,9 +221,12 @@ fn refresh_cached(entry: &mut CacheEntry, board: &Board, view: KingView, white_v
 // Real positions never overflow i16; wrapping ops just avoid debug-mode panics.
 #[inline]
 fn transition_add_sub(
-    src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN], dst_b: &mut [i16; N_HIDDEN],
-    add: (usize, usize), sub: (usize, usize),
+    src_w: &[i16; N_HIDDEN],
+    src_b: &[i16; N_HIDDEN],
+    dst_w: &mut [i16; N_HIDDEN],
+    dst_b: &mut [i16; N_HIDDEN],
+    add: (usize, usize),
+    sub: (usize, usize),
 ) {
     let ft = &WEIGHTS.ft_weights;
     let aw = &ft[add.0];
@@ -241,9 +241,13 @@ fn transition_add_sub(
 
 #[inline]
 fn transition_add_sub2(
-    src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN], dst_b: &mut [i16; N_HIDDEN],
-    add: (usize, usize), sub1: (usize, usize), sub2: (usize, usize),
+    src_w: &[i16; N_HIDDEN],
+    src_b: &[i16; N_HIDDEN],
+    dst_w: &mut [i16; N_HIDDEN],
+    dst_b: &mut [i16; N_HIDDEN],
+    add: (usize, usize),
+    sub1: (usize, usize),
+    sub2: (usize, usize),
 ) {
     let ft = &WEIGHTS.ft_weights;
     let aw = &ft[add.0];
@@ -259,11 +263,16 @@ fn transition_add_sub2(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn transition_add2_sub2(
-    src_w: &[i16; N_HIDDEN], src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN], dst_b: &mut [i16; N_HIDDEN],
-    add1: (usize, usize), add2: (usize, usize),
-    sub1: (usize, usize), sub2: (usize, usize),
+    src_w: &[i16; N_HIDDEN],
+    src_b: &[i16; N_HIDDEN],
+    dst_w: &mut [i16; N_HIDDEN],
+    dst_b: &mut [i16; N_HIDDEN],
+    add1: (usize, usize),
+    add2: (usize, usize),
+    sub1: (usize, usize),
+    sub2: (usize, usize),
 ) {
     let ft = &WEIGHTS.ft_weights;
     let a1w = &ft[add1.0];
@@ -275,12 +284,8 @@ fn transition_add2_sub2(
     let s2w = &ft[sub2.0];
     let s2b = &ft[sub2.1];
     for h in 0..N_HIDDEN {
-        dst_w[h] = src_w[h]
-            .wrapping_add(a1w[h]).wrapping_add(a2w[h])
-            .wrapping_sub(s1w[h]).wrapping_sub(s2w[h]);
-        dst_b[h] = src_b[h]
-            .wrapping_add(a1b[h]).wrapping_add(a2b[h])
-            .wrapping_sub(s1b[h]).wrapping_sub(s2b[h]);
+        dst_w[h] = src_w[h].wrapping_add(a1w[h]).wrapping_add(a2w[h]).wrapping_sub(s1w[h]).wrapping_sub(s2w[h]);
+        dst_b[h] = src_b[h].wrapping_add(a1b[h]).wrapping_add(a2b[h]).wrapping_sub(s1b[h]).wrapping_sub(s2b[h]);
     }
 }
 
@@ -304,11 +309,7 @@ impl Accumulator {
     }
 
     pub fn evaluate(&self, stm: Color, bucket: usize) -> i32 {
-        let (us, them) = if stm == Color::White {
-            (&self.white, &self.black)
-        } else {
-            (&self.black, &self.white)
-        };
+        let (us, them) = if stm == Color::White { (&self.white, &self.black) } else { (&self.black, &self.white) };
         let w = &*WEIGHTS;
         let sum = if SCRELU {
             let sq = screlu_dot(us, them, &w.head_weights_i16[bucket], QA as i16);
@@ -327,6 +328,12 @@ pub struct AccStack {
     ply: usize,
     // Refresh cache per side (white, black), indexed by KingView::slot.
     cache: [Vec<CacheEntry>; 2],
+}
+
+impl Default for AccStack {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AccStack {
@@ -360,9 +367,7 @@ impl AccStack {
         let stm = board_after.side_to_move.opp();
         let (wv, bv) = KingView::of(board_after);
 
-        let arrived = board_after
-            .piece_at(to)
-            .expect("push_after: arrived square is empty");
+        let arrived = board_after.piece_at(to).expect("push_after: arrived square is empty");
         let original_kind = if m.is_promotion() { PieceKind::Pawn } else { arrived.kind };
         let sub_mover = feature_indices(stm, original_kind, from.0 as usize, wv, bv);
         let add_mover = feature_indices(stm, arrived.kind, to.0 as usize, wv, bv);
@@ -378,8 +383,14 @@ impl AccStack {
             let sub_rook = feature_indices(stm, PieceKind::Rook, rf.0 as usize, wv, bv);
             let add_rook = feature_indices(stm, PieceKind::Rook, rt.0 as usize, wv, bv);
             transition_add2_sub2(
-                &src.white, &src.black, &mut dst.white, &mut dst.black,
-                add_mover, add_rook, sub_mover, sub_rook,
+                &src.white,
+                &src.black,
+                &mut dst.white,
+                &mut dst.black,
+                add_mover,
+                add_rook,
+                sub_mover,
+                sub_rook,
             );
         } else if let Some(cap) = undo.captured {
             let cap_sq = if flag == Move::EP_CAPTURE {
@@ -391,15 +402,9 @@ impl AccStack {
                 to
             };
             let sub_cap = feature_indices(cap.color, cap.kind, cap_sq.0 as usize, wv, bv);
-            transition_add_sub2(
-                &src.white, &src.black, &mut dst.white, &mut dst.black,
-                add_mover, sub_mover, sub_cap,
-            );
+            transition_add_sub2(&src.white, &src.black, &mut dst.white, &mut dst.black, add_mover, sub_mover, sub_cap);
         } else {
-            transition_add_sub(
-                &src.white, &src.black, &mut dst.white, &mut dst.black,
-                add_mover, sub_mover,
-            );
+            transition_add_sub(&src.white, &src.black, &mut dst.white, &mut dst.black, add_mover, sub_mover);
         }
 
         // A king that changed bucket or crossed the mirror line invalidates its side's
@@ -447,10 +452,7 @@ mod tests {
             accs.push_after(&board, m, &undo);
             let fresh = Accumulator::recompute(&board);
             let inc = &accs.stack[accs.ply];
-            assert!(
-                inc.white == fresh.white && inc.black == fresh.black,
-                "accumulator mismatch after {m} from {fen}",
-            );
+            assert!(inc.white == fresh.white && inc.black == fresh.black, "accumulator mismatch after {m} from {fen}",);
             board.unmake_move(m, undo);
         }
     }
@@ -470,7 +472,7 @@ mod tests {
             for ply in 0..200 {
                 let mut list = MoveList::new();
                 board.gen_legal_into(&mut list);
-                if list.len() == 0 {
+                if list.is_empty() {
                     break;
                 }
                 let m = list.get((ply * 7 + 3) % list.len());
@@ -478,7 +480,10 @@ mod tests {
                 accs.push_after(&board, m, &undo);
                 let fresh = Accumulator::recompute(&board);
                 let inc = &accs.stack[accs.ply];
-                assert!(inc.white == fresh.white && inc.black == fresh.black, "mismatch after {m} at ply {ply} from {fen}");
+                assert!(
+                    inc.white == fresh.white && inc.black == fresh.black,
+                    "mismatch after {m} at ply {ply} from {fen}"
+                );
                 // Keep the stack shallow; the board walks on.
                 accs.stack[0] = accs.stack[accs.ply].clone();
                 accs.ply = 0;

@@ -1,6 +1,6 @@
 use crate::core::{
-    bishop_attacks, lsb, rook_attacks, Board, Color, Move, MoveList, PieceKind,
-    Square, KING_ATTACKS, KNIGHT_ATTACKS, PAWN_ATTACKS,
+    bishop_attacks, lsb, rook_attacks, Board, Color, Move, MoveList, PieceKind, Square, KING_ATTACKS, KNIGHT_ATTACKS,
+    PAWN_ATTACKS,
 };
 use crate::eval::AccStack;
 use crate::timeman::{self, TimeBudget};
@@ -38,12 +38,7 @@ impl Limits {
         Self::depth(MAX_PLY as u32)
     }
     pub fn budget(b: TimeBudget) -> Self {
-        Self {
-            max_depth: MAX_PLY as u32,
-            soft_ms: b.soft_ms,
-            hard_ms: b.hard_ms,
-            max_nodes: u64::MAX,
-        }
+        Self { max_depth: MAX_PLY as u32, soft_ms: b.soft_ms, hard_ms: b.hard_ms, max_nodes: u64::MAX }
     }
 }
 
@@ -195,12 +190,7 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Self {
-            tt: Tt::new(),
-            history: Vec::new(),
-            params: SearchParams::default(),
-            ctx: SearchCtx::new(),
-        }
+        Self { tt: Tt::new(), history: Vec::new(), params: SearchParams::default(), ctx: SearchCtx::new() }
     }
     /// Returns (best move, score in cp, nodes searched, depth reached).
     pub fn search(&mut self, board: &mut Board, limits: Limits) -> (Option<Move>, i32, u64, u32) {
@@ -226,7 +216,9 @@ impl Engine {
         self.tt = Tt::with_mb(1);
         self.tt = Tt::with_mb(mb);
     }
-    pub fn set_game_history(&mut self, history: Vec<u64>) { self.history = history; }
+    pub fn set_game_history(&mut self, history: Vec<u64>) {
+        self.history = history;
+    }
     pub fn reset(&mut self) {
         self.tt.clear();
         self.history.clear();
@@ -235,7 +227,9 @@ impl Engine {
 }
 
 impl Default for Engine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 pub const TT_DEFAULT_MB: usize = 64;
@@ -288,6 +282,12 @@ pub struct Tt {
     buckets: Vec<Bucket>,
     mask: u64,
     gen: u8,
+}
+
+impl Default for Tt {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Tt {
@@ -414,7 +414,6 @@ fn tt_score_from_probe(stored: i16, ply: i32) -> i32 {
     }
 }
 
-
 /// Tightens the static eval with a TT score whose bound points the right way.
 #[inline]
 fn adjust_eval(eval: i32, tt_score: Option<i32>, bound: u8) -> i32 {
@@ -465,9 +464,7 @@ impl ContHist {
 
     #[inline]
     fn index(off: usize, prev: (u8, u8), cur: (u8, u8)) -> usize {
-        ((((off * PIECE_NB + prev.0 as usize) * 64 + prev.1 as usize) * PIECE_NB
-            + cur.0 as usize)
-            * 64)
+        ((((off * PIECE_NB + prev.0 as usize) * 64 + prev.1 as usize) * PIECE_NB + cur.0 as usize) * 64)
             + cur.1 as usize
     }
 
@@ -499,7 +496,7 @@ fn piece_key(board: &Board, m: Move) -> (u8, u8) {
 fn quiet_history(ctx: &SearchCtx, board: &Board, m: Move, ply: usize) -> i32 {
     let mut h = ctx.history_heur[board.side_to_move.idx()][m.from().idx()][m.to().idx()];
     let cur = piece_key(board, m);
-    if ply >= 1 && ply < MAX_PLY {
+    if (1..MAX_PLY).contains(&ply) {
         if let Some(prev) = ctx.played[ply] {
             h += ctx.cont.get(0, prev, cur);
         }
@@ -558,8 +555,7 @@ fn is_insufficient_material(board: &Board) -> bool {
 
 pub fn search(board: &mut Board, max_depth: u32) -> (Option<Move>, i32) {
     let mut tt = Tt::new();
-    let (m, s, _, _) =
-        search_with_limits(board, Limits::depth(max_depth), &mut tt, &[], SearchParams::default());
+    let (m, s, _, _) = search_with_limits(board, Limits::depth(max_depth), &mut tt, &[], SearchParams::default());
     (m, s)
 }
 
@@ -585,11 +581,8 @@ fn run_search(
     mut on_iter: Option<&mut dyn FnMut(&IterInfo)>,
 ) -> (Option<Move>, i32, u64, u32) {
     let start = Instant::now();
-    let hard_deadline = if limits.hard_ms == u64::MAX {
-        None
-    } else {
-        Some(start + Duration::from_millis(limits.hard_ms))
-    };
+    let hard_deadline =
+        if limits.hard_ms == u64::MAX { None } else { Some(start + Duration::from_millis(limits.hard_ms)) };
     // Stability scaling and the mate early-out only apply to clock budgets.
     let fixed_time = limits.soft_ms != u64::MAX && limits.soft_ms == limits.hard_ms;
 
@@ -608,13 +601,7 @@ fn run_search(
             let target = if fixed_time {
                 limits.soft_ms
             } else {
-                timeman::scaled_soft(
-                    limits.soft_ms,
-                    limits.hard_ms,
-                    bm_stability,
-                    best_score,
-                    prev_score,
-                )
+                timeman::scaled_soft(limits.soft_ms, limits.hard_ms, bm_stability, best_score, prev_score)
             };
             if start.elapsed().as_millis() as u64 >= target {
                 break;
@@ -630,7 +617,7 @@ fn run_search(
             }
             break;
         }
-        if m.is_some() {
+        if let Some(mv) = m {
             bm_stability = if m == best_move { bm_stability.saturating_add(1) } else { 0 };
             prev_score = best_score;
             best_move = m;
@@ -639,7 +626,7 @@ fn run_search(
 
             if let Some(report) = on_iter.as_mut() {
                 let root_pv = ctx.root_pv();
-                let single = [m.unwrap()];
+                let single = [mv];
                 let pv = if root_pv.first() == m.as_ref() { root_pv } else { &single };
                 report(&IterInfo {
                     depth: d,
@@ -653,11 +640,7 @@ fn run_search(
             }
         }
 
-        if !fixed_time
-            && limits.soft_ms != u64::MAX
-            && best_score.abs() >= MATE_THRESHOLD
-            && bm_stability >= 2
-        {
+        if !fixed_time && limits.soft_ms != u64::MAX && best_score.abs() >= MATE_THRESHOLD && bm_stability >= 2 {
             break;
         }
     }
@@ -765,6 +748,7 @@ impl SearchCtx {
 
     /// Moves the correction toward `best - raw`, weighted by depth. Skips results whose bound
     /// says nothing about the eval, mates, and noisy best moves.
+    #[allow(clippy::too_many_arguments)]
     fn update_correction(
         &mut self,
         board: &Board,
@@ -834,14 +818,7 @@ impl SearchCtx {
 
     /// `board` must be the node position (moves unmade).
     #[inline]
-    fn update_quiet_histories(
-        &mut self,
-        board: &Board,
-        ply: usize,
-        best: Move,
-        searched: &[Move],
-        depth: u32,
-    ) {
+    fn update_quiet_histories(&mut self, board: &Board, ply: usize, best: Move, searched: &[Move], depth: u32) {
         let d = depth as i32;
         let bonus = (160 * d - 80).clamp(0, 1600);
         let malus = (180 * d - 60).clamp(0, 1800);
@@ -858,7 +835,7 @@ impl SearchCtx {
         let e = &mut self.history_heur[board.side_to_move.idx()][m.from().idx()][m.to().idx()];
         *e += delta - *e * delta.abs() / HISTORY_MAX;
         let cur = piece_key(board, m);
-        if ply >= 1 && ply < MAX_PLY {
+        if (1..MAX_PLY).contains(&ply) {
             if let Some(prev) = self.played[ply] {
                 self.cont.add(0, prev, cur, delta);
             }
@@ -940,11 +917,7 @@ fn search_root(
     let root_hash = board.hash;
     let original_alpha = alpha;
     ctx.pv_len[0] = 0;
-    let raw_eval = if board.in_check(board.side_to_move) {
-        None
-    } else {
-        Some(ctx.accs.evaluate(board))
-    };
+    let raw_eval = if board.in_check(board.side_to_move) { None } else { Some(ctx.accs.evaluate(board)) };
     ctx.evals[0] = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let tt_move = tt.probe(root_hash).map(|e| Move(e.move_packed));
     let mut sm = ScoredMoves::from_list(&moves, board, pv, tt_move, ctx, 0);
@@ -992,15 +965,7 @@ fn search_root(
         BOUND_UPPER
     };
     if best.is_some() {
-        tt.store(
-            root_hash,
-            best,
-            tt_score_to_store(best_score, 0),
-            raw_eval,
-            depth.min(255) as u8,
-            bound,
-            true,
-        );
+        tt.store(root_hash, best, tt_score_to_store(best_score, 0), raw_eval, depth.min(255) as u8, bound, true);
     }
     (best, best_score)
 }
@@ -1094,11 +1059,7 @@ fn negamax(
 
     let in_check = board.in_check(board.side_to_move);
     let p = ctx.params;
-    let raw_eval = if in_check {
-        None
-    } else {
-        Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board)))
-    };
+    let raw_eval = if in_check { None } else { Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board))) };
     let static_eval = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let eval = static_eval.map(|ev| adjust_eval(ev, tt_score, tt_bound));
     ctx.evals[ply_us] = static_eval;
@@ -1107,7 +1068,7 @@ fn negamax(
         None => false,
         Some(ev) => {
             let back = |n: usize| if ply_us >= n { ctx.evals[ply_us - n] } else { None };
-            back(2).or_else(|| back(4)).map_or(true, |e| ev > e)
+            back(2).or_else(|| back(4)).is_none_or(|e| ev > e)
         }
     };
 
@@ -1116,10 +1077,9 @@ fn negamax(
         && depth >= 1
         && depth <= p.rfp_max_depth as u32
         && beta.abs() < MATE_THRESHOLD
+        && eval.unwrap() - p.rfp_margin * (depth as i32 - improving as i32) >= beta
     {
-        if eval.unwrap() - p.rfp_margin * (depth as i32 - improving as i32) >= beta {
-            return beta;
-        }
+        return beta;
     }
 
     if !pv_node && allow_null && !in_check && depth >= p.nmp_min_depth as u32 {
@@ -1128,39 +1088,27 @@ fn negamax(
             | board.piece_bb[stm_idx][PieceKind::Bishop.idx()]
             | board.piece_bb[stm_idx][PieceKind::Rook.idx()]
             | board.piece_bb[stm_idx][PieceKind::Queen.idx()];
-        if non_pawn_bb != 0 {
-            if eval.unwrap() >= beta {
-                let r = p.nmp_base_r as u32 + (depth / p.nmp_divisor as u32);
-                let undo = board.make_null_move();
-                tt.prefetch(board.hash);
-                ctx.accs.push_null();
-                if ply_us + 1 < MAX_PLY {
-                    ctx.played[ply_us + 1] = None;
-                }
-                ctx.hashes.push(hash);
-                let floor = std::mem::replace(&mut ctx.rep_floor, ctx.hashes.len());
-                let null_score = -negamax(
-                    board,
-                    depth.saturating_sub(1 + r),
-                    -beta,
-                    -beta + 1,
-                    ply + 1,
-                    ctx,
-                    tt,
-                    false,
-                    None,
-                    false,
-                );
-                ctx.rep_floor = floor;
-                ctx.hashes.pop();
-                ctx.accs.pop_null();
-                board.unmake_null_move(undo);
-                if ctx.stop {
-                    return alpha;
-                }
-                if null_score >= beta {
-                    return beta;
-                }
+        if non_pawn_bb != 0 && eval.unwrap() >= beta {
+            let r = p.nmp_base_r as u32 + (depth / p.nmp_divisor as u32);
+            let undo = board.make_null_move();
+            tt.prefetch(board.hash);
+            ctx.accs.push_null();
+            if ply_us + 1 < MAX_PLY {
+                ctx.played[ply_us + 1] = None;
+            }
+            ctx.hashes.push(hash);
+            let floor = std::mem::replace(&mut ctx.rep_floor, ctx.hashes.len());
+            let null_score =
+                -negamax(board, depth.saturating_sub(1 + r), -beta, -beta + 1, ply + 1, ctx, tt, false, None, false);
+            ctx.rep_floor = floor;
+            ctx.hashes.pop();
+            ctx.accs.pop_null();
+            board.unmake_null_move(undo);
+            if ctx.stop {
+                return alpha;
+            }
+            if null_score >= beta {
+                return beta;
             }
         }
     }
@@ -1207,7 +1155,7 @@ fn negamax(
             }
             if is_quiet
                 && depth <= p.fp_max_depth as u32
-                && eval.map_or(false, |ev| ev + p.fp_margin * depth as i32 <= alpha)
+                && eval.is_some_and(|ev| ev + p.fp_margin * depth as i32 <= alpha)
             {
                 skipped += sm.drop_quiets_after(slot);
                 continue;
@@ -1237,8 +1185,16 @@ fn negamax(
                     let singular_beta = ts - p.singular_margin * depth as i32;
                     let reduced = (depth - 1) / 2;
                     let value = negamax(
-                        board, reduced, singular_beta - 1, singular_beta, ply, ctx, tt, false,
-                        Some(m), cut_node,
+                        board,
+                        reduced,
+                        singular_beta - 1,
+                        singular_beta,
+                        ply,
+                        ctx,
+                        tt,
+                        false,
+                        Some(m),
+                        cut_node,
                     );
                     // The excluded search shares this ply's PV slot.
                     ctx.pv_len[ply_us] = ply_us;
@@ -1281,20 +1237,16 @@ fn negamax(
                 && !m.is_capture()
                 && !m.is_promotion();
             let initial_depth = if do_lmr {
-                let base_r = p.lmr_base as u32
-                    + depth / p.lmr_depth_div as u32
-                    + (i as u32) / p.lmr_move_div as u32;
+                let base_r = p.lmr_base as u32 + depth / p.lmr_depth_div as u32 + (i as u32) / p.lmr_move_div as u32;
                 let adj = (move_hist / p.lmr_history_div).clamp(-2, 2);
-                let r = (base_r as i32 - adj + !improving as i32 + 2 * cut_node as i32 - tt_pv as i32)
-                    .max(0) as u32;
+                let r = (base_r as i32 - adj + !improving as i32 + 2 * cut_node as i32 - tt_pv as i32).max(0) as u32;
                 new_depth.saturating_sub(r).max(1)
             } else {
                 new_depth
             };
 
-            score = -negamax(
-                board, initial_depth, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, do_lmr || !cut_node,
-            );
+            score =
+                -negamax(board, initial_depth, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, do_lmr || !cut_node);
 
             if do_lmr && !ctx.stop && score > alpha {
                 score = -negamax(board, new_depth, -alpha - 1, -alpha, ply + 1, ctx, tt, true, None, !cut_node);
@@ -1363,7 +1315,6 @@ fn negamax(
 
 const SEE_VALUES: [i32; 6] = [100, 320, 330, 500, 900, 10000];
 
-
 fn attackers_of(board: &Board, sq: Square, side: Color, occ: u64) -> u64 {
     let side_idx = side.idx();
     let opp_idx = side.opp().idx();
@@ -1372,11 +1323,9 @@ fn attackers_of(board: &Board, sq: Square, side: Color, occ: u64) -> u64 {
     let bq_targets = bishop_attacks(sq, occ);
     let rq_targets = rook_attacks(sq, occ);
     let bq = bq_targets
-        & (board.piece_bb[side_idx][PieceKind::Bishop.idx()]
-            | board.piece_bb[side_idx][PieceKind::Queen.idx()]);
+        & (board.piece_bb[side_idx][PieceKind::Bishop.idx()] | board.piece_bb[side_idx][PieceKind::Queen.idx()]);
     let rq = rq_targets
-        & (board.piece_bb[side_idx][PieceKind::Rook.idx()]
-            | board.piece_bb[side_idx][PieceKind::Queen.idx()]);
+        & (board.piece_bb[side_idx][PieceKind::Rook.idx()] | board.piece_bb[side_idx][PieceKind::Queen.idx()]);
     let k = KING_ATTACKS[sq.idx()] & board.piece_bb[side_idx][PieceKind::King.idx()];
     (p | n | bq | rq | k) & occ
 }
@@ -1463,14 +1412,7 @@ fn see(board: &Board, m: Move) -> i32 {
     gain[0]
 }
 
-fn qsearch(
-    board: &mut Board,
-    mut alpha: i32,
-    beta: i32,
-    ply: u32,
-    ctx: &mut SearchCtx,
-    tt: &mut Tt,
-) -> i32 {
+fn qsearch(board: &mut Board, mut alpha: i32, beta: i32, ply: u32, ctx: &mut SearchCtx, tt: &mut Tt) -> i32 {
     if ctx.check() {
         return 0;
     }
@@ -1586,10 +1528,7 @@ fn qsearch(
 
 fn qscore(m: Move, board: &Board) -> i32 {
     if m.is_capture() {
-        let attacker = board
-            .piece_at(m.from())
-            .map(|p| p.kind as i32)
-            .unwrap_or(0);
+        let attacker = board.piece_at(m.from()).map(|p| p.kind as i32).unwrap_or(0);
         let victim = if m.flag() == Move::EP_CAPTURE {
             PieceKind::Pawn as i32
         } else {
@@ -1613,17 +1552,14 @@ fn qscore(m: Move, board: &Board) -> i32 {
 // Inverse of the capture branch of score_move.
 #[inline]
 fn see_from_score(score: i32) -> i32 {
-    if score > 0 { score - 100_000 } else { score + 100_000 }
+    if score > 0 {
+        score - 100_000
+    } else {
+        score + 100_000
+    }
 }
 
-fn score_move(
-    m: Move,
-    board: &Board,
-    pv: Option<Move>,
-    tt_move: Option<Move>,
-    ctx: &SearchCtx,
-    ply: usize,
-) -> i32 {
+fn score_move(m: Move, board: &Board, pv: Option<Move>, tt_move: Option<Move>, ctx: &SearchCtx, ply: usize) -> i32 {
     if tt_move == Some(m) {
         return 2_000_000;
     }
@@ -1992,4 +1928,3 @@ mod tests {
         let _ = foreign; // suppress unused if collision is rare
     }
 }
-

@@ -28,10 +28,7 @@ pub struct TimeBudget {
 }
 
 impl TimeBudget {
-    pub const UNLIMITED: TimeBudget = TimeBudget {
-        soft_ms: u64::MAX,
-        hard_ms: u64::MAX,
-    };
+    pub const UNLIMITED: TimeBudget = TimeBudget { soft_ms: u64::MAX, hard_ms: u64::MAX };
 
     #[inline]
     pub fn is_unlimited(&self) -> bool {
@@ -57,10 +54,7 @@ pub fn allocate(go: &GoLimits, stm: Color) -> TimeBudget {
 
     let usable = remaining.saturating_sub(MOVE_OVERHEAD_MS).max(1);
 
-    let mtg = go
-        .movestogo
-        .map(|m| (m as u64).max(1))
-        .unwrap_or(MOVES_HORIZON);
+    let mtg = go.movestogo.map(|m| (m as u64).max(1)).unwrap_or(MOVES_HORIZON);
 
     let base = usable / mtg + inc.saturating_mul(3) / 4;
 

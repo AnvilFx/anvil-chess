@@ -20,7 +20,15 @@ pub const KING_BUCKET: [u8; 64] = {
     let mut sq = 0;
     while sq < 64 {
         let half = (sq / 8) * 4 + if sq % 8 > 3 { 7 - sq % 8 } else { sq % 8 };
-        t[sq] = if half < 2 { 0 } else if half < 4 { 1 } else if half < 12 { 2 } else { 3 };
+        t[sq] = if half < 2 {
+            0
+        } else if half < 4 {
+            1
+        } else if half < 12 {
+            2
+        } else {
+            3
+        };
         sq += 1;
     }
     t
@@ -47,9 +55,7 @@ static RAW: &[u8] = include_bytes!("net.nnue");
 pub(crate) static WEIGHTS: Lazy<NnueWeights> = Lazy::new(decode_weights);
 
 fn decode_weights() -> NnueWeights {
-    let read_i32 = |i: usize| {
-        i32::from_le_bytes([RAW[i], RAW[i + 1], RAW[i + 2], RAW[i + 3]])
-    };
+    let read_i32 = |i: usize| i32::from_le_bytes([RAW[i], RAW[i + 1], RAW[i + 2], RAW[i + 3]]);
     let n_hidden = read_i32(0);
     let qa = read_i32(4);
     let qb = read_i32(8);
@@ -100,8 +106,8 @@ fn decode_weights() -> NnueWeights {
     }
 
     let mut ft_bias = [0i16; N_HIDDEN];
-    for h in 0..N_HIDDEN {
-        ft_bias[h] = read_i16(cursor);
+    for b in ft_bias.iter_mut() {
+        *b = read_i16(cursor);
         cursor += 2;
     }
 
@@ -116,13 +122,14 @@ fn decode_weights() -> NnueWeights {
     let head_weights_i16 = head_weights.map(|bucket| bucket.map(i16::from));
 
     assert!(
-        qa == QA && qb == QB && out_scale == OUT_SCALE && (activation == 1) == SCRELU
-            && mirrored == MIRRORED && king_bucket == KING_BUCKET,
+        qa == QA
+            && qb == QB
+            && out_scale == OUT_SCALE
+            && (activation == 1) == SCRELU
+            && mirrored == MIRRORED
+            && king_bucket == KING_BUCKET,
         "net.nnue header does not match the compiled constants in params.rs"
     );
 
-    NnueWeights {
-        ft_weights: ft, ft_bias, head_weights, head_weights_i16,
-        head_bias_q,
-    }
+    NnueWeights { ft_weights: ft, ft_bias, head_weights, head_weights_i16, head_bias_q }
 }

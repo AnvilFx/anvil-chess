@@ -1,8 +1,7 @@
 use std::fmt;
 use std::mem::MaybeUninit;
 
-pub const STARTING_FEN: &str =
-    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+pub const STARTING_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,12 +107,7 @@ impl Square {
 
 impl fmt::Display for Square {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "{}{}",
-            (b'a' + self.file()) as char,
-            (b'1' + self.rank()) as char
-        )
+        write!(f, "{}{}", (b'a' + self.file()) as char, (b'1' + self.rank()) as char)
     }
 }
 
@@ -167,9 +161,7 @@ impl Move {
     #[inline]
     pub const fn is_capture(self) -> bool {
         let f = self.flag();
-        f == Self::CAPTURE
-            || f == Self::EP_CAPTURE
-            || f >= Self::PROMO_CAP_KNIGHT
+        f == Self::CAPTURE || f == Self::EP_CAPTURE || f >= Self::PROMO_CAP_KNIGHT
     }
 
     #[inline]
@@ -224,12 +216,7 @@ impl Default for MoveList {
 impl MoveList {
     #[inline]
     pub fn new() -> Self {
-        Self {
-            moves: unsafe {
-                MaybeUninit::<[MaybeUninit<Move>; MAX_MOVES]>::uninit().assume_init()
-            },
-            len: 0,
-        }
+        Self { moves: unsafe { MaybeUninit::<[MaybeUninit<Move>; MAX_MOVES]>::uninit().assume_init() }, len: 0 }
     }
 
     #[inline]

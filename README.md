@@ -1,57 +1,100 @@
 # Anvil
 
-A bitboard chess engine in Rust with an NNUE evaluation and an alpha-beta / PVS
-search. Standalone UCI engine, no GUI.
+A UCI chess engine written in Rust, with an NNUE evaluation trained only on its own
+self-play games. Anvil has no GUI; use it from any UCI interface (Cute Chess, Arena,
+Banksia, fastchess, ...).
+
+## Features
+
+**Search**
+- Iterative deepening, principal variation search, aspiration windows
+- Transposition table (4-entry buckets, 64 MB by default)
+- Null move pruning, reverse futility pruning, futility pruning, late move pruning,
+  SEE pruning
+- Late move reductions with history adjustment
+- Singular extensions with multi-cut, internal iterative reductions
+- Move ordering by TT move, SEE-scored captures, killers, history and continuation history
+- Pawn-structure correction history for the static eval
+- Quiescence search with SEE filtering
+- Repetition and fifty-move draw detection
+
+**Evaluation**
+- NNUE `(768x4 -> 512)x2 -> 1x8`: four king buckets with horizontal mirroring,
+  SCReLU activation, eight output buckets by piece count
+- Incrementally updated accumulators with a per-king-bucket refresh cache
+- AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
+
+## Building
+
+Requires a recent stable Rust toolchain.
+
+```sh
+cargo build --release
+```
+
+The binary is `target/release/anvil-engine` (`.exe` on Windows). The net is embedded,
+so the binary is all you need.
+
+`.cargo/config.toml` builds with `target-cpu=native`, which is fastest but may not run
+on older CPUs than the build machine. For a portable binary, change it to
+`target-cpu=x86-64-v3` (AVX2, most CPUs since 2015) or `x86-64-v2`.
+
+## UCI
+
+Supported `go` limits: `wtime`, `btime`, `winc`, `binc`, `movestogo`, `movetime`,
+`depth`, `nodes`, `infinite`. Anvil searches with one thread.
+
+| Option | Default | Range | |
+|---|---|---|---|
+| Hash | 64 | 1-32768 | Transposition table size in MB |
+
+The other options (`RFPMargin`, `LMRBase`, `SEEQuietMargin`, ...) are search parameters
+exposed for SPSA tuning. The defaults are the tuned values; leave them alone for play.
+
+The non-standard `eval` command prints the static NNUE eval of the current position.
+
+## The net
+
+The net in `src/eval/net.nnue` is trained with
+[bullet](https://github.com/jw1912/bullet) on positions from Anvil's own self-play
+games, labelled with its own search scores and game results. No other engine's data
+or evals are used.
+
+- `tools/train/anvil.rs` is the bullet training config.
+- `tools/gen_net.py` quantizes a trained net into `net.nnue`. The header carries the
+  quantization and bucket settings, so swapping in a net of the same shape needs no
+  code changes.
+- `nets/` holds the f32 weights and settings of the current net, so it can be
+  regenerated:
+
+```sh
+python tools/gen_net.py nets/bullet-kb4-397m.bin nets/bullet-kb4.json src/eval/net.nnue
+cargo build --release
+```
+
+A different hidden width or output bucket count also needs `N_HIDDEN` / `N_BUCKETS` in
+`src/eval/params.rs`.
 
 ## Layout
 
 ```
-src/                  Engine crate `anvil-engine` (lib `anvil_engine` + UCI binary)
-  core/                 bitboards, board, movegen, zobrist
-  eval/                 NNUE: net.nnue (baked in), params, inference
-  search.rs             alpha-beta / PVS, TT, move ordering, draw detection
-  timeman.rs            time management (soft/hard budgets, stability scaling)
-  uci.rs                UCI protocol front-end
-nets/                 NNUE weights: trained source (.bin/.json) + old-net backup
-tools/                gen_net.py: quantize a trained net into src/eval/net.nnue
+src/
+  core/       bitboards, board, move generation, zobrist keys
+  eval/       NNUE inference and the embedded net
+  search.rs   search, transposition table, move ordering
+  timeman.rs  time management
+  uci.rs      UCI front end
+nets/         f32 weights and settings of the current net
+tools/        net quantizer and training config
 ```
 
-## Build & run
+## Testing
 
 ```sh
-# Optimized build -> target/release/anvil-engine(.exe)
-cargo build --release
-
-# Run the UCI engine
-cargo run --release
+cargo test --release
 ```
 
-## Swapping the NNUE net
+## License
 
-The net is baked into the binary via `include_bytes!("net.nnue")`. To use a
-retrained net, regenerate it and rebuild; the header carries the quantization
-params, so no source edits are needed for a same-width retrain:
-
-```sh
-python tools/gen_net.py nets/bullet-ob8.bin nets/bullet-ob8.json src/eval/net.nnue
-cargo build --release
-```
-
-A change in hidden width also needs `N_HIDDEN` updated in `src/eval/params.rs`.
-
-The engine has 8 output buckets chosen by piece count (bullet's
-`MaterialCount<8>`). Nets are trained with `bullet/examples/anvil.rs`; give
-`gen_net.py` a json with `"n_hidden": 512, "buckets": 8, "head_scale": 400,
-"activation": "screlu"` (see `nets/bullet-ob8.json`).
-Single-output nets such as `nnue63m.bin` are copied into every bucket.
-
-King input buckets and horizontal mirroring are read from the header too:
-`"king_buckets"` (32 entries, files a-d per rank from rank 1, matching
-`BUCKET_LAYOUT` in `anvil.rs`) and `"mirrored"` in the json (see
-`nets/bullet-kb4.json`). Without them the net is unbucketed, as 3.8's is.
-
-## CPU target
-
-`.cargo/config.toml` sets `target-cpu=native` (AVX2/BMI2 on the build machine).
-For a portable binary, change it to `x86-64-v3` or remove the file. The NNUE
-itself runtime-detects AVX-VNNI/AVX2, so it stays correct regardless.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT), at your option.
