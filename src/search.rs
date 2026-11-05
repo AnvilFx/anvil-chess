@@ -89,8 +89,10 @@ pub const PARAM_SPECS: &[ParamSpec] = &[
     // A *MaxDepth of 0 disables that pruning.
     ParamSpec { name: "LMPMaxDepth", default: 2, min: 0, max: 12 },
     ParamSpec { name: "LMPBase", default: 6, min: 1, max: 16 },
-    ParamSpec { name: "FPMaxDepth", default: 4, min: 0, max: 12 },
+    ParamSpec { name: "FPMaxDepth", default: 8, min: 0, max: 12 },
     ParamSpec { name: "FPMargin", default: 80, min: 30, max: 400 },
+    // Quiet history counts toward the futility margin as history / FPHistDiv cp.
+    ParamSpec { name: "FPHistDiv", default: 32, min: 8, max: 256 },
     ParamSpec { name: "SEEMaxDepth", default: 4, min: 0, max: 12 },
     ParamSpec { name: "SEEQuietMargin", default: 84, min: 0, max: 200 },
     ParamSpec { name: "SEECaptMargin", default: 102, min: 0, max: 200 },
@@ -126,6 +128,7 @@ pub struct SearchParams {
     pub lmp_base: i32,
     pub fp_max_depth: i32,
     pub fp_margin: i32,
+    pub fp_hist_div: i32,
     pub see_max_depth: i32,
     pub see_quiet_margin: i32,
     pub see_capt_margin: i32,
@@ -161,8 +164,9 @@ impl Default for SearchParams {
             lmr_shallower_margin: 10,
             lmp_max_depth: 2,
             lmp_base: 6,
-            fp_max_depth: 4,
+            fp_max_depth: 8,
             fp_margin: 80,
+            fp_hist_div: 32,
             see_max_depth: 4,
             see_quiet_margin: 84,
             see_capt_margin: 102,
@@ -206,6 +210,7 @@ impl SearchParams {
             "LMPBase" => self.lmp_base = v,
             "FPMaxDepth" => self.fp_max_depth = v,
             "FPMargin" => self.fp_margin = v,
+            "FPHistDiv" => self.fp_hist_div = v,
             "SEEMaxDepth" => self.see_max_depth = v,
             "SEEQuietMargin" => self.see_quiet_margin = v,
             "SEECaptMargin" => self.see_capt_margin = v,
@@ -1222,6 +1227,7 @@ fn negamax(
 
         // Never prune while best_score is a mated score, so forced lines survive.
         let is_quiet = !m.is_capture() && !m.is_promotion();
+        let move_hist = if i > 0 && is_quiet { quiet_history(ctx, board, m, ply_us) } else { 0 };
         if i > 0 && !in_check && best_score > -MATE_THRESHOLD {
             if is_quiet
                 && depth <= p.lmp_max_depth as u32
@@ -1230,11 +1236,11 @@ fn negamax(
                 skipped += sm.drop_quiets_after(slot);
                 continue;
             }
+            // Only this move goes: a killer ahead of the history-sorted quiets may score lower than they do.
             if is_quiet
                 && depth <= p.fp_max_depth as u32
-                && eval.is_some_and(|ev| ev + p.fp_margin * depth as i32 <= alpha)
+                && eval.is_some_and(|ev| ev + p.fp_margin * depth as i32 + move_hist / p.fp_hist_div <= alpha)
             {
-                skipped += sm.drop_quiets_after(slot);
                 continue;
             }
             if depth <= p.see_max_depth as u32 {
@@ -1247,7 +1253,6 @@ fn negamax(
             }
         }
         let move_key = piece_key(board, m);
-        let move_hist = if i > 0 && is_quiet { quiet_history(ctx, board, m, ply_us) } else { 0 };
 
         // Extend a lone TT move, multi-cut if another move beats beta, otherwise reduce it.
         let mut extension: i32 = 0;
