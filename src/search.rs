@@ -539,9 +539,41 @@ fn piece_key(board: &Board, m: Move) -> (u8, u8) {
     (idx, m.to().idx() as u8)
 }
 
+/// Indexed `[stm][from attacked][to attacked][from][to]`.
+type ButterflyHist = [[[[[i16; 64]; 64]; 2]; 2]; 2];
+
+#[inline]
+fn attacks_of_set(mut set: u64, f: impl Fn(usize) -> u64) -> u64 {
+    let mut t = 0;
+    while set != 0 {
+        t |= f(set.trailing_zeros() as usize);
+        set &= set - 1;
+    }
+    t
+}
+
+/// Squares attacked by the side not to move.
+fn threat_map(board: &Board) -> u64 {
+    let them = board.side_to_move.opp().idx();
+    let occ = board.occupancy;
+    let bb = &board.piece_bb[them];
+    let queens = bb[PieceKind::Queen.idx()];
+    attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[them][s])
+        | attacks_of_set(bb[PieceKind::Knight.idx()], |s| KNIGHT_ATTACKS[s])
+        | attacks_of_set(bb[PieceKind::Bishop.idx()] | queens, |s| bishop_attacks(Square(s as u8), occ))
+        | attacks_of_set(bb[PieceKind::Rook.idx()] | queens, |s| rook_attacks(Square(s as u8), occ))
+        | attacks_of_set(bb[PieceKind::King.idx()], |s| KING_ATTACKS[s])
+}
+
+#[inline]
+fn butterfly_slot(threats: u64, m: Move) -> (usize, usize) {
+    ((threats >> m.from().idx()) as usize & 1, (threats >> m.to().idx()) as usize & 1)
+}
+
 #[inline]
 fn quiet_history(ctx: &SearchCtx, board: &Board, m: Move, ply: usize) -> i32 {
-    let mut h = ctx.history_heur[board.side_to_move.idx()][m.from().idx()][m.to().idx()];
+    let (tf, tt) = butterfly_slot(ctx.threats[ply], m);
+    let mut h = ctx.history_heur[board.side_to_move.idx()][tf][tt][m.from().idx()][m.to().idx()] as i32;
     let cur = piece_key(board, m);
     if (1..MAX_PLY).contains(&ply) {
         if let Some(prev) = ctx.played[ply] {
@@ -723,7 +755,9 @@ struct SearchCtx {
     pv: Box<[[Move; MAX_PLY + 1]; MAX_PLY + 1]>,
     pv_len: [usize; MAX_PLY + 1],
     killers: [[Option<Move>; 2]; MAX_PLY],
-    history_heur: Box<[[[i32; 64]; 64]; 2]>,
+    history_heur: Box<ButterflyHist>,
+    /// Squares the opponent attacks at each ply of the current path, for history indexing.
+    threats: [u64; MAX_PLY + 1],
     cont: ContHist,
     /// The (piece, to) move that led into each ply.
     played: [Option<(u8, u8)>; MAX_PLY],
@@ -755,7 +789,8 @@ impl SearchCtx {
             pv: Box::new([[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1]),
             pv_len: [0; MAX_PLY + 1],
             killers: [[None; 2]; MAX_PLY],
-            history_heur: Box::new([[[0; 64]; 64]; 2]),
+            history_heur: Box::new([[[[[0; 64]; 64]; 2]; 2]; 2]),
+            threats: [0; MAX_PLY + 1],
             cont: ContHist::new(),
             played: [None; MAX_PLY],
             evals: [None; MAX_PLY],
@@ -799,7 +834,7 @@ impl SearchCtx {
 
     fn clear_heuristics(&mut self) {
         self.killers = [[None; 2]; MAX_PLY];
-        *self.history_heur = [[[0; 64]; 64]; 2];
+        *self.history_heur = [[[[[0; 64]; 64]; 2]; 2]; 2];
         self.cont.clear();
         self.corr.iter_mut().for_each(|t| t.fill(0));
     }
@@ -896,8 +931,10 @@ impl SearchCtx {
 
     #[inline]
     fn history_stat(&mut self, board: &Board, ply: usize, m: Move, delta: i32) {
-        let e = &mut self.history_heur[board.side_to_move.idx()][m.from().idx()][m.to().idx()];
-        *e += delta - *e * delta.abs() / HISTORY_MAX;
+        let (tf, tt) = butterfly_slot(self.threats[ply], m);
+        let e = &mut self.history_heur[board.side_to_move.idx()][tf][tt][m.from().idx()][m.to().idx()];
+        let v = *e as i32;
+        *e = (v + delta - v * delta.abs() / HISTORY_MAX) as i16;
         let cur = piece_key(board, m);
         if (1..MAX_PLY).contains(&ply) {
             if let Some(prev) = self.played[ply] {
@@ -989,6 +1026,7 @@ fn search_root(
     let raw_eval = if board.in_check(board.side_to_move) { None } else { Some(ctx.accs.evaluate(board)) };
     ctx.evals[0] = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let tt_move = tt.probe(root_hash).map(|e| Move(e.move_packed));
+    ctx.threats[0] = threat_map(board);
     let mut sm = ScoredMoves::from_list(&moves, board, pv, tt_move, ctx, 0);
     let mut best: Option<Move> = None;
     let mut best_score = -INF;
@@ -1204,6 +1242,7 @@ fn negamax(
         return 0;
     }
 
+    ctx.threats[ply_us] = threat_map(board);
     let mut sm = ScoredMoves::tt_move_first(&moves, board, tt_move, ctx, ply_us);
     let mut best_move: Option<Move> = None;
     let mut best_score = -INF;
@@ -1821,6 +1860,38 @@ impl ScoredMoves {
 mod tests {
     use super::*;
     use crate::core::Board;
+
+    #[test]
+    fn threat_map_matches_square_attack_queries() {
+        let fens = [
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+        ];
+        let mut rng: u64 = 0x2545_F491_4F6C_DD1D;
+        for fen in fens {
+            for _ in 0..20 {
+                let mut board = Board::from_fen(fen).unwrap();
+                for _ in 0..40 {
+                    let them = board.side_to_move.opp();
+                    let t = threat_map(&board);
+                    for sq in 0..64u8 {
+                        let hit = t >> sq & 1 == 1;
+                        assert_eq!(hit, board.is_square_attacked(Square(sq), them), "{sq} in {}", board.to_fen());
+                    }
+                    let mut all = MoveList::new();
+                    board.gen_legal_into(&mut all);
+                    if all.is_empty() {
+                        break;
+                    }
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    board.make_move(all.get((rng % all.len() as u64) as usize));
+                }
+            }
+        }
+    }
 
     #[test]
     fn capture_cannot_lose_implies_nonnegative_see() {
