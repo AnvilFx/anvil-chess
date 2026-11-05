@@ -26,6 +26,11 @@ Banksia, fastchess, ...).
 
 ## Strength
 
+Tested at faster time controls because I am impatient.
+
+These estimates are very rough because of the difference in time controls. They are
+only meant to give a general idea of the engine's strength.
+
 Matches against engines with a [CCRL Blitz](https://computerchess.org.uk/ccrl/404/)
 rating. The estimate is the opponent's rating plus the measured Elo difference, so it
 is approximate: these matches run at a different time control and on different
@@ -34,9 +39,11 @@ hardware than CCRL.
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
 | 3.11 | Stockfish 12 | 3656 | 10+0.1 | 1000 | 205 / 487 / 308 | -36 ± 13 | ~3620 |
+| 3.11.1 | Reckless 0.9.0 | 3767 | 10+0.1 | 1000 | 9 / 360 / 631 | -253 ± 18 | ~3515 |
 
 Single thread for both engines, games played in colour-swapped opening pairs on an
-Intel i7-14700F. Error bars are 95%, from the pentanomial pair results.
+Intel i7-14700F. Error bars are 95%, from the pentanomial pair results (from W / D / L
+for Reckless).
 
 ## Downloads
 
