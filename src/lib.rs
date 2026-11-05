@@ -1,4 +1,4 @@
-pub mod core;
+pub mod chess;
 pub mod eval;
 pub mod search;
 pub mod timeman;

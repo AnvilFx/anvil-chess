@@ -1,6 +1,6 @@
 // Soft limit: no new iteration starts past it. Hard limit: the search aborts mid-iteration.
 
-use crate::core::Color;
+use crate::chess::Color;
 
 pub const MOVE_OVERHEAD_MS: u64 = 15;
 

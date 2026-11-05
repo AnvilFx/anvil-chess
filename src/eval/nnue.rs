@@ -1,7 +1,7 @@
 // Built with target-cpu=native, so plain loops auto-vectorize; only the VNNI head uses intrinsics.
 
 use super::params::*;
-use crate::core::{Board, Color, Move, PieceKind, Square, UndoInfo};
+use crate::chess::{Board, Color, Move, PieceKind, Square, UndoInfo};
 
 // All lanes are summed at the end, so no lane permute is needed.
 #[cfg(target_arch = "x86_64")]
@@ -438,7 +438,7 @@ impl AccStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{Board, MoveList};
+    use crate::chess::{Board, MoveList};
 
     fn assert_incremental_matches_recompute(fen: &str) {
         let mut board = Board::from_fen(fen).unwrap();

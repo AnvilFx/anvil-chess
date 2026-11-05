@@ -101,13 +101,24 @@ A different hidden width or output bucket count also needs `N_HIDDEN` / `N_BUCKE
 
 ```
 src/
-  core/       bitboards, board, move generation, zobrist keys
-  eval/       NNUE inference and the embedded net
-  search.rs   search, transposition table, move ordering
-  timeman.rs  time management
-  uci.rs      UCI front end
-nets/         f32 weights and settings of the current net
-tools/        net quantizer and training config
+  chess/          the rules: board, move generation, bitboards, zobrist keys
+    board.rs      position state, FEN, make/unmake
+    movegen.rs    legal and noisy move generation, perft
+  eval/           NNUE inference and the embedded net
+  search/         the search
+    mod.rs        Engine, limits, iterative deepening
+    negamax.rs    root, negamax, quiescence, draw detection
+    ordering.rs   move scoring and staged move picking
+    history.rs    history tables and correction keys
+    context.rs    per-search state
+    see.rs        static exchange evaluation
+    tt.rs         transposition table
+    params.rs     tunable parameters and SPSA ranges
+    tests.rs      search tests
+  timeman.rs      time management
+  uci.rs          UCI front end
+nets/             f32 weights and settings of the current net
+tools/            net quantizer and training config
 ```
 
 ## Testing
