@@ -24,6 +24,20 @@ Banksia, fastchess, ...).
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
 
+## Strength
+
+Matches against engines with a [CCRL Blitz](https://computerchess.org.uk/ccrl/404/)
+rating. The estimate is the opponent's rating plus the measured Elo difference, so it
+is approximate: these matches run at a different time control and on different
+hardware than CCRL.
+
+| Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
+|---|---|---|---|---|---|---|---|
+| 3.11 | Stockfish 12 | 3656 | 10+0.1 | 1000 | 205 / 487 / 308 | -36 ± 13 | ~3620 |
+
+Single thread for both engines, games played in colour-swapped opening pairs on an
+Intel i7-14700F. Error bars are 95%, from the pentanomial pair results.
+
 ## Downloads
 
 Binaries for Windows and Linux are on the
