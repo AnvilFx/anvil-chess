@@ -40,10 +40,12 @@ hardware than CCRL.
 |---|---|---|---|---|---|---|---|
 | 3.11 | Stockfish 12 | 3656 | 10+0.1 | 1000 | 205 / 487 / 308 | -36 ± 13 | ~3620 |
 | 3.11.1 | Reckless 0.9.0 | 3767 | 10+0.1 | 1000 | 9 / 360 / 631 | -253 ± 18 | ~3515 |
+| 3.11.1 | Lynx 1.11.0 | 3363 | 10+0.1 | 1000 | 791 / 174 / 35 | +343 ± 26 | ~3705 |
+| **Average** | | | | | | | **~3615** |
 
 Single thread for both engines, games played in colour-swapped opening pairs on an
 Intel i7-14700F. Error bars are 95%, from the pentanomial pair results (from W / D / L
-for Reckless).
+for Reckless and Lynx).
 
 ## Downloads
 
