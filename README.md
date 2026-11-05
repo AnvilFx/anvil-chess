@@ -90,7 +90,7 @@ or evals are used.
   regenerated:
 
 ```sh
-python tools/gen_net.py nets/bullet-kb4-397m.bin nets/bullet-kb4.json src/eval/net.nnue
+python tools/gen_net.py nets/bullet-kb4-504m.bin nets/bullet-kb4.json src/eval/net.nnue
 cargo build --release
 ```
 
