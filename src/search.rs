@@ -62,8 +62,8 @@ pub struct ParamSpec {
 
 /// Divisor minimums are 2 so the formulas dividing by them never hit zero.
 pub const PARAM_SPECS: &[ParamSpec] = &[
-    ParamSpec { name: "RFPMargin", default: 55, min: 20, max: 200 },
-    ParamSpec { name: "RFPMaxDepth", default: 7, min: 3, max: 12 },
+    ParamSpec { name: "RFPMargin", default: 69, min: 20, max: 200 },
+    ParamSpec { name: "RFPMaxDepth", default: 6, min: 3, max: 12 },
     ParamSpec { name: "NMPBaseR", default: 3, min: 1, max: 5 },
     ParamSpec { name: "NMPDivisor", default: 3, min: 2, max: 8 },
     ParamSpec { name: "NMPMinDepth", default: 2, min: 2, max: 6 },
@@ -88,14 +88,14 @@ pub const PARAM_SPECS: &[ParamSpec] = &[
     ParamSpec { name: "LMRShallowerMargin", default: 10, min: 0, max: 60 },
     // A *MaxDepth of 0 disables that pruning.
     ParamSpec { name: "LMPMaxDepth", default: 2, min: 0, max: 12 },
-    ParamSpec { name: "LMPBase", default: 6, min: 1, max: 16 },
-    ParamSpec { name: "FPMaxDepth", default: 8, min: 0, max: 12 },
-    ParamSpec { name: "FPMargin", default: 80, min: 30, max: 400 },
+    ParamSpec { name: "LMPBase", default: 8, min: 1, max: 16 },
+    ParamSpec { name: "FPMaxDepth", default: 6, min: 0, max: 12 },
+    ParamSpec { name: "FPMargin", default: 100, min: 30, max: 400 },
     // Quiet history counts toward the futility margin as history / FPHistDiv cp.
     ParamSpec { name: "FPHistDiv", default: 32, min: 8, max: 256 },
-    ParamSpec { name: "SEEMaxDepth", default: 4, min: 0, max: 12 },
-    ParamSpec { name: "SEEQuietMargin", default: 84, min: 0, max: 200 },
-    ParamSpec { name: "SEECaptMargin", default: 102, min: 0, max: 200 },
+    ParamSpec { name: "SEEMaxDepth", default: 3, min: 0, max: 12 },
+    ParamSpec { name: "SEEQuietMargin", default: 105, min: 0, max: 200 },
+    ParamSpec { name: "SEECaptMargin", default: 128, min: 0, max: 200 },
     ParamSpec { name: "SingularMinDepth", default: 6, min: 4, max: 12 },
     ParamSpec { name: "SingularMargin", default: 3, min: 1, max: 8 },
     ParamSpec { name: "AspMinDepth", default: 6, min: 2, max: 10 },
@@ -142,8 +142,8 @@ impl Default for SearchParams {
     fn default() -> Self {
         // Must match the PARAM_SPECS defaults.
         Self {
-            rfp_margin: 55,
-            rfp_max_depth: 7,
+            rfp_margin: 69,
+            rfp_max_depth: 6,
             nmp_base_r: 3,
             nmp_divisor: 3,
             nmp_min_depth: 2,
@@ -163,13 +163,13 @@ impl Default for SearchParams {
             lmr_deeper_margin: 60,
             lmr_shallower_margin: 10,
             lmp_max_depth: 2,
-            lmp_base: 6,
-            fp_max_depth: 8,
-            fp_margin: 80,
+            lmp_base: 8,
+            fp_max_depth: 6,
+            fp_margin: 100,
             fp_hist_div: 32,
-            see_max_depth: 4,
-            see_quiet_margin: 84,
-            see_capt_margin: 102,
+            see_max_depth: 3,
+            see_quiet_margin: 105,
+            see_capt_margin: 128,
             singular_min_depth: 6,
             singular_margin: 3,
             asp_min_depth: 6,
