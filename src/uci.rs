@@ -1,4 +1,4 @@
-use crate::core::{Board, Color, Move, MoveList, PieceKind, Square};
+use crate::chess::{Board, Color, Move, MoveList, PieceKind, Square};
 use crate::search::{Engine, IterInfo, Limits, MATE_SCORE, MATE_THRESHOLD, PARAM_SPECS, TT_DEFAULT_MB, TT_MAX_MB};
 use crate::timeman::{self, GoLimits};
 use std::io::{self, BufRead, Write};

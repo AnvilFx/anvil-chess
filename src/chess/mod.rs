@@ -1,5 +1,6 @@
 mod bitboard;
 mod board;
+mod movegen;
 mod types;
 mod zobrist;
 
