@@ -21,6 +21,7 @@ Banksia, fastchess, ...).
 **Evaluation**
 - NNUE `(768x4 -> 512)x2 -> 1x8`: four king buckets with horizontal mirroring,
   SCReLU activation, eight output buckets by piece count
+- Trained on 504M positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
 
@@ -87,9 +88,9 @@ The non-standard `eval` command prints the static NNUE eval of the current posit
 ## The net
 
 The net in `src/eval/net.nnue` is trained with
-[bullet](https://github.com/jw1912/bullet) on positions from Anvil's own self-play
-games, labelled with its own search scores and game results. No other engine's data
-or evals are used.
+[bullet](https://github.com/jw1912/bullet) on 504 million deduplicated positions from
+Anvil's own self-play games, labelled with its own search scores and game results. No
+other engine's data or evals are used.
 
 - `tools/train/anvil.rs` is the bullet training config.
 - `tools/gen_net.py` quantizes a trained net into `net.nnue`. The header carries the
