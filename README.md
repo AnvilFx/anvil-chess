@@ -10,7 +10,7 @@ Banksia, fastchess, ...).
 - Iterative deepening, principal variation search, aspiration windows
 - Transposition table (4-entry buckets, 64 MB by default)
 - Null move pruning, reverse futility pruning, futility pruning, late move pruning,
-  SEE pruning
+  SEE pruning, ProbCut
 - Late move reductions with history adjustment
 - Singular extensions with multi-cut, internal iterative reductions
 - Move ordering by TT move, SEE-scored captures, killers, history and continuation history

@@ -332,6 +332,55 @@ pub(super) fn negamax(
         }
     }
 
+    // ProbCut: a capture that clears beta by a margin at reduced depth very likely refutes this node.
+    let pc_beta = beta + p.probcut_margin;
+    if !pv_node
+        && !in_check
+        && excluded.is_none()
+        && depth >= p.probcut_min_depth as u32
+        && beta.abs() < MATE_THRESHOLD
+        && !(tt_depth + 3 >= depth && tt_score.is_some_and(|s| s < pc_beta))
+    {
+        let se = static_eval.unwrap();
+        let mut noisy = MoveList::new();
+        board.gen_noisy_into(&mut noisy);
+        let mut pc = ScoredMoves::empty();
+        for k in 0..noisy.len() {
+            let m = noisy.get(k);
+            // Only moves whose material swing alone can bridge the gap to pc_beta.
+            if see(board, m) >= pc_beta - se {
+                pc.push(m, if Some(m) == tt_move { 1_000_000 } else { qscore(m, board) });
+            }
+        }
+        let pc_depth = depth - 4;
+        for k in 0..pc.len {
+            let (m, _) = pc.pop_best(k);
+            let key = piece_key(board, m);
+            let undo = board.make_move(m);
+            tt.prefetch(board.hash);
+            if ply_us + 1 < MAX_PLY {
+                ctx.played[ply_us + 1] = Some(key);
+            }
+            ctx.accs.push_after(board, m, &undo);
+            ctx.hashes.push(hash);
+            // A cheap qsearch filters out moves that don't even hold up tactically.
+            let mut score = -qsearch(board, -pc_beta, -pc_beta + 1, ply + 1, ctx, tt);
+            if score >= pc_beta && pc_depth > 0 && !ctx.stop {
+                score = -negamax(board, pc_depth, -pc_beta, -pc_beta + 1, ply + 1, ctx, tt, true, None, false);
+            }
+            ctx.hashes.pop();
+            ctx.accs.pop();
+            board.unmake_move(m, undo);
+            if ctx.stop {
+                return alpha;
+            }
+            if score >= pc_beta {
+                tt.store(hash, Some(m), tt_score_to_store(score, ply_i), raw_eval, (pc_depth + 1) as u8, BOUND_LOWER, tt_pv);
+                return score;
+            }
+        }
+    }
+
     let mut moves = MoveList::new();
     board.gen_legal_into(&mut moves);
     if moves.is_empty() {
