@@ -51,6 +51,25 @@ pub const PARAM_SPECS: &[ParamSpec] = &[
     ParamSpec { name: "SingularMargin", default: 3, min: 1, max: 8 },
     ParamSpec { name: "AspMinDepth", default: 6, min: 2, max: 10 },
     ParamSpec { name: "AspDelta", default: 21, min: 4, max: 60 },
+    // Quiet history: bonus = clamp(Mul * depth - Off, 0, Max), same shape for the malus.
+    // AspFullWindow: past this half-width the aspiration window opens fully.
+    ParamSpec { name: "HistBonusMul", default: 181, min: 32, max: 512 },
+    ParamSpec { name: "HistBonusOff", default: 81, min: 0, max: 400 },
+    ParamSpec { name: "HistBonusMax", default: 1609, min: 400, max: 4096 },
+    ParamSpec { name: "HistMalusMul", default: 194, min: 32, max: 512 },
+    ParamSpec { name: "HistMalusOff", default: 52, min: 0, max: 400 },
+    ParamSpec { name: "HistMalusMax", default: 1828, min: 400, max: 4096 },
+    // Correction update weight min(depth + 1, CorrWeightMax)/256; applied as corr * CorrScale / 256.
+    ParamSpec { name: "CorrWeightMax", default: 15, min: 4, max: 64 },
+    ParamSpec { name: "CorrScale", default: 260, min: 64, max: 512 },
+    ParamSpec { name: "LMRHistClamp", default: 2887, min: 1024, max: 6144 },
+    ParamSpec { name: "IIRMinDepth", default: 5, min: 2, max: 8 },
+    ParamSpec { name: "AspFullWindow", default: 489, min: 100, max: 1000 },
+    // Soft time scaling: stability 1/1000 per stable iteration, fall and node share in 1/100.
+    ParamSpec { name: "TmStability", default: 36, min: 0, max: 100 },
+    ParamSpec { name: "TmFall", default: 51, min: 0, max: 150 },
+    ParamSpec { name: "TmNodeBase", default: 159, min: 110, max: 250 },
+    ParamSpec { name: "TmNodeScale", default: 164, min: 50, max: 300 },
 ];
 
 #[derive(Clone, Copy)]
@@ -91,6 +110,21 @@ pub struct SearchParams {
     pub singular_margin: i32,
     pub asp_min_depth: i32,
     pub asp_delta: i32,
+    pub hist_bonus_mul: i32,
+    pub hist_bonus_off: i32,
+    pub hist_bonus_max: i32,
+    pub hist_malus_mul: i32,
+    pub hist_malus_off: i32,
+    pub hist_malus_max: i32,
+    pub corr_weight_max: i32,
+    pub corr_scale: i32,
+    pub lmr_hist_clamp: i32,
+    pub iir_min_depth: i32,
+    pub asp_full_window: i32,
+    pub tm_stability: i32,
+    pub tm_fall: i32,
+    pub tm_node_base: i32,
+    pub tm_node_scale: i32,
 }
 
 impl Default for SearchParams {
@@ -133,6 +167,21 @@ impl Default for SearchParams {
             singular_margin: 3,
             asp_min_depth: 6,
             asp_delta: 21,
+            hist_bonus_mul: 181,
+            hist_bonus_off: 81,
+            hist_bonus_max: 1609,
+            hist_malus_mul: 194,
+            hist_malus_off: 52,
+            hist_malus_max: 1828,
+            corr_weight_max: 15,
+            corr_scale: 260,
+            lmr_hist_clamp: 2887,
+            iir_min_depth: 5,
+            asp_full_window: 489,
+            tm_stability: 36,
+            tm_fall: 51,
+            tm_node_base: 159,
+            tm_node_scale: 164,
         }
     }
 }
@@ -181,6 +230,21 @@ impl SearchParams {
             "SingularMargin" => self.singular_margin = v,
             "AspMinDepth" => self.asp_min_depth = v,
             "AspDelta" => self.asp_delta = v,
+            "HistBonusMul" => self.hist_bonus_mul = v,
+            "HistBonusOff" => self.hist_bonus_off = v,
+            "HistBonusMax" => self.hist_bonus_max = v,
+            "HistMalusMul" => self.hist_malus_mul = v,
+            "HistMalusOff" => self.hist_malus_off = v,
+            "HistMalusMax" => self.hist_malus_max = v,
+            "CorrWeightMax" => self.corr_weight_max = v,
+            "CorrScale" => self.corr_scale = v,
+            "LMRHistClamp" => self.lmr_hist_clamp = v,
+            "IIRMinDepth" => self.iir_min_depth = v,
+            "AspFullWindow" => self.asp_full_window = v,
+            "TmStability" => self.tm_stability = v,
+            "TmFall" => self.tm_fall = v,
+            "TmNodeBase" => self.tm_node_base = v,
+            "TmNodeScale" => self.tm_node_scale = v,
             _ => return false,
         }
         true

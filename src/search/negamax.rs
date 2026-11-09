@@ -1,9 +1,6 @@
 // Alpha-beta search: root, negamax, quiescence and draw detection.
 use super::*;
 
-/// Past this half-width the aspiration window opens fully.
-pub(super) const ASP_FULL_WINDOW: i32 = 500;
-
 /// `hashes` holds every position before this node; index `root` is the root position and
 /// nothing before `floor` (the last null move) counts. One earlier occurrence after the
 /// root is a draw; positions up to the root need two, as in a real three-fold.
@@ -92,7 +89,7 @@ pub(super) fn search_root_aspiration(
             return (best, s);
         }
         delta += delta / 2 + 1;
-        if delta >= ASP_FULL_WINDOW {
+        if delta >= p.asp_full_window {
             alpha = -INF;
             beta = INF;
         }
@@ -272,7 +269,7 @@ pub(super) fn negamax(
     }
 
     // Without a TT move this node was never searched well; spend less on it.
-    if depth >= IIR_MIN_DEPTH && tt_move.is_none() && excluded.is_none() {
+    if depth >= ctx.params.iir_min_depth as u32 && tt_move.is_none() && excluded.is_none() {
         depth -= 1;
     }
 
@@ -528,7 +525,7 @@ pub(super) fn negamax(
                 if noisy {
                     r -= p.lmr_capt_offset;
                 } else {
-                    r -= (move_hist * 1024 / p.lmr_history_div).clamp(-3072, 3072);
+                    r -= (move_hist * 1024 / p.lmr_history_div).clamp(-p.lmr_hist_clamp, p.lmr_hist_clamp);
                     if ctx.killers[ply_us].contains(&Some(m)) {
                         r -= p.lmr_killer;
                     }
