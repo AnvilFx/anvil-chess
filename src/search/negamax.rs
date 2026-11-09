@@ -291,6 +291,23 @@ pub(super) fn negamax(
         }
     };
 
+    // Razoring: far below alpha at low depth, trust qsearch if it agrees.
+    if !pv_node
+        && !in_check
+        && excluded.is_none()
+        && depth <= p.razor_max_depth as u32
+        && alpha.abs() < MATE_THRESHOLD
+        && eval.unwrap() + p.razor_margin * depth as i32 <= alpha
+    {
+        let score = qsearch(board, alpha, alpha + 1, ply, ctx, tt);
+        if ctx.stop {
+            return alpha;
+        }
+        if score <= alpha {
+            return score;
+        }
+    }
+
     if !pv_node
         && !in_check
         && depth >= 1
