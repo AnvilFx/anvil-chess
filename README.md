@@ -39,15 +39,15 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
+| 3.13.2 | Reckless 0.9.0 | 3767 | 10+0.1 | 1000 | 16 / 389 / 595 | -230 ± 17 | ~3537 |
 | 3.13.2 | Stockfish 12 | 3656 | 10+0.1 | 1000 | 177 / 485 / 338 | -56 ± 15 | ~3600 |
-| 3.12 | Booot 7.4 | 3651 | 10+0.1 | 1000 | 214 / 470 / 316 | -36 ± 16 | ~3615 |
-| 3.11.1 | Reckless 0.9.0 | 3767 | 10+0.1 | 1000 | 9 / 360 / 631 | -253 ± 18 | ~3515 |
-| 3.11.1 | Lynx 1.11.0 | 3363 | 10+0.1 | 1000 | 791 / 174 / 35 | +343 ± 26 | ~3705 |
-| **Average** | | | | | | | **~3610** |
+| 3.13.2 | Booot 7.4 | 3651 | 10+0.1 | 1000 | 252 / 449 / 299 | -16 ± 16 | ~3635 |
+| 3.13.2 | Prune 4.0.1 | 3644 | 10+0.1 | 1000 | 173 / 481 / 346 | -61 ± 16 | ~3583 |
+| 3.13.2 | Thrawn 3.2 | 3591 | 10+0.1 | 1000 | 409 / 393 / 198 | +74 ± 17 | ~3665 |
+| **Average** | | | | | | | **~3605** |
 
 Single thread for both engines, games played in colour-swapped opening pairs on an
-Intel i7-14700F, except Stockfish 12 (its BMI2 build), played on an AMD EPYC 9R14
-server running 124 games at a time. Error bars are 95%, from W / D / L.
+AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%, from W / D / L.
 
 ## Downloads
 
