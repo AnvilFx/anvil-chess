@@ -24,7 +24,7 @@
 # needs N_HIDDEN / N_BUCKETS in src/eval/params.rs; the loader asserts a match.
 #
 # Usage (run from the project root):
-#   python tools/gen_net.py nets/bullet-kb4-631m.bin nets/bullet-kb4.json src/eval/net.nnue
+#   python tools/gen_net.py nets/bullet-kb4-984m.bin nets/bullet-kb4.json src/eval/net.nnue
 
 import argparse
 import json
