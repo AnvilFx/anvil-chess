@@ -105,7 +105,7 @@ impl SearchCtx {
 
     #[inline]
     pub(super) fn corrected_eval(&self, board: &Board, raw: i32) -> i32 {
-        let c = self.corr[board.side_to_move.idx()][pawn_key(board)] as i32 / CORR_GRAIN;
+        let c = self.corr[board.side_to_move.idx()][pawn_key(board)] as i32 * self.params.corr_scale / (CORR_GRAIN * 256);
         (raw + c).clamp(-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1)
     }
 
@@ -130,7 +130,7 @@ impl SearchCtx {
             return;
         }
         let target = (best - raw).clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
-        let weight = (depth as i32 + 1).min(16);
+        let weight = (depth as i32 + 1).min(self.params.corr_weight_max);
         let e = &mut self.corr[board.side_to_move.idx()][pawn_key(board)];
         *e = ((*e as i32 * (256 - weight) + target * weight) / 256) as i16;
     }
@@ -190,8 +190,9 @@ impl SearchCtx {
         depth: u32,
     ) {
         let d = depth as i32;
-        let bonus = (160 * d - 80).clamp(0, 1600);
-        let malus = (180 * d - 60).clamp(0, 1800);
+        let p = &self.params;
+        let bonus = (p.hist_bonus_mul * d - p.hist_bonus_off).clamp(0, p.hist_bonus_max);
+        let malus = (p.hist_malus_mul * d - p.hist_malus_off).clamp(0, p.hist_malus_max);
         self.history_stat(board, ply, best, bonus);
         for &q in searched {
             if q != best {

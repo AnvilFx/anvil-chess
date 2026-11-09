@@ -122,7 +122,6 @@ impl Default for Engine {
 }
 
 const MAX_PLY: usize = 128;
-const IIR_MIN_DEPTH: u32 = 4;
 /// Node-based time scaling starts once this many iterations have completed.
 const NODE_TM_MIN_DEPTH: u32 = 7;
 
@@ -178,7 +177,7 @@ fn run_search(
                 let best_share = best_move
                     .filter(|_| completed_depth >= NODE_TM_MIN_DEPTH && ctx.nodes > 0)
                     .map(|m| ctx.root_nodes[root_node_idx(m)] as f64 / ctx.nodes as f64);
-                timeman::scaled_soft(limits.soft_ms, limits.hard_ms, bm_stability, best_score, prev_score, best_share)
+                timeman::scaled_soft(limits.soft_ms, limits.hard_ms, bm_stability, best_score, prev_score, best_share, &params)
             };
             if start.elapsed().as_millis() as u64 >= target {
                 break;
