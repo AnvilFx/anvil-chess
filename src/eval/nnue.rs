@@ -70,8 +70,10 @@ fn head_dot(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i8; 2 * N_HIDD
     head_dot_scalar(us, them, head, qa, head_bias)
 }
 
-// sum of clamp(x)^2 * w at scale qa^2 * qb. clamp(x) * w fits i16 for |w| <= 127, and each
-// i32 lane gathers 128 terms, so lanes can't overflow; the total needs i64.
+// sum of clamp(x)^2 * w at scale qa^2 * qb. clamp(x) * w fits i16 for |w| <= 128, and each
+// i32 lane gathers N_HIDDEN / 4 terms (at most 255 * 32640 each), so lanes can't overflow up to
+// N_HIDDEN 1024; the total needs i64.
+const _: () = assert!(N_HIDDEN <= 1024, "screlu_dot_avx2 lanes would overflow");
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn screlu_dot_avx2(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_HIDDEN], qa: i16) -> i64 {

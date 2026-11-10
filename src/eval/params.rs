@@ -1,6 +1,6 @@
 use once_cell::sync::Lazy;
 
-pub const N_HIDDEN: usize = 512;
+pub const N_HIDDEN: usize = 1024;
 pub const N_BUCKETS: usize = 8;
 
 // Fixed by the embedded net (checked against its header when decoding), so the hot

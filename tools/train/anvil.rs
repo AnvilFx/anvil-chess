@@ -1,5 +1,5 @@
 // Copy into a bullet checkout (github.com/jw1912/bullet, tested at da426a4) as examples/anvil.rs.
-// Anvil's net: (768x4 -> 512)x2 -> 1x8, SCReLU, 4 horizontally mirrored king buckets
+// Anvil's net: (768x4 -> 1024)x2 -> 1x8, SCReLU, 4 horizontally mirrored king buckets
 // (factorised) and output buckets by piece count.
 // Saves plain f32 weights; tools/gen_net.py quantises them for the engine.
 //
@@ -21,7 +21,7 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
 };
 
-const HL_SIZE: usize = 512;
+const HL_SIZE: usize = 1024;
 const NUM_OUTPUT_BUCKETS: usize = 8;
 
 // King square (files a-d, the e-h half is mirrored onto it) -> input bucket, rank 1 first.

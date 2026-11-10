@@ -19,9 +19,9 @@ Banksia, fastchess, ...).
 - Repetition and fifty-move draw detection
 
 **Evaluation**
-- NNUE `(768x4 -> 512)x2 -> 1x8`: four king buckets with horizontal mirroring,
+- NNUE `(768x4 -> 1024)x2 -> 1x8`: four king buckets with horizontal mirroring,
   SCReLU activation, eight output buckets by piece count
-- Trained on 984M positions from Anvil's own self-play
+- Trained on 1.5B positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
 
@@ -39,12 +39,12 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
-| 3.13.2 | Reckless 0.9.0 | 3767 | 10+0.1 | 1000 | 16 / 389 / 595 | -230 ± 17 | ~3537 |
-| 3.13.2 | Stockfish 12 | 3656 | 10+0.1 | 1000 | 177 / 485 / 338 | -56 ± 15 | ~3600 |
-| 3.13.2 | Booot 7.4 | 3651 | 10+0.1 | 1000 | 252 / 449 / 299 | -16 ± 16 | ~3635 |
-| 3.13.2 | Prune 4.0.1 | 3644 | 10+0.1 | 1000 | 173 / 481 / 346 | -61 ± 16 | ~3583 |
-| 3.13.2 | Thrawn 3.2 | 3591 | 10+0.1 | 1000 | 409 / 393 / 198 | +74 ± 17 | ~3665 |
-| **Average** | | | | | | | **~3605** |
+| 3.14.0 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 18 / 432 / 550 | -206 ± 16 | ~3561 |
+| 3.14.0 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 192 / 458 / 350 | -55 ± 16 | ~3601 |
+| 3.14.0 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 244 / 461 / 295 | -18 ± 16 | ~3633 |
+| 3.14.0 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 187 / 492 / 321 | -47 ± 15 | ~3597 |
+| 3.14.0 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 406 / 410 / 184 | +78 ± 17 | ~3669 |
+| **Average** | | | | | | | **~3612** |
 
 Single thread for both engines, games played in colour-swapped opening pairs on an
 AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%, from W / D / L.
@@ -89,7 +89,7 @@ The non-standard `eval` command prints the static NNUE eval of the current posit
 ## The net
 
 The net in `src/eval/net.nnue` is trained with
-[bullet](https://github.com/jw1912/bullet) on 984 million deduplicated positions from
+[bullet](https://github.com/jw1912/bullet) on 1.5 billion deduplicated positions from
 Anvil's own self-play games, labelled with its own search scores and game results. No
 other engine's data or evals are used.
 
@@ -101,7 +101,7 @@ other engine's data or evals are used.
   regenerated:
 
 ```sh
-python tools/gen_net.py nets/bullet-kb4-984m.bin nets/bullet-kb4.json src/eval/net.nnue
+python tools/gen_net.py nets/bullet-kb4-hl1024-1501m.bin nets/bullet-kb4.json src/eval/net.nnue
 cargo build --release
 ```
 
