@@ -1,5 +1,5 @@
 {
-  "n_hidden": 512,
+  "n_hidden": 1024,
   "buckets": 8,
   "head_scale": 400,
   "activation": "screlu",
