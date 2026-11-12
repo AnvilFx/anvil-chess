@@ -275,7 +275,8 @@ pub(super) fn negamax(
 
     let in_check = board.in_check(board.side_to_move);
     let p = ctx.params;
-    let raw_eval = if in_check { None } else { Some(tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board))) };
+    let cached = ctx.child_eval.filter(|c| c.0 == hash).map(|c| c.1);
+    let raw_eval = if in_check { None } else { Some(tt_eval.or(cached).unwrap_or_else(|| ctx.accs.evaluate(board))) };
     let static_eval = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let eval = static_eval.map(|ev| adjust_eval(ev, tt_score, tt_bound));
     ctx.evals[ply_us] = static_eval;
@@ -533,8 +534,20 @@ pub(super) fn negamax(
                 r += p.lmr_not_improving * !improving as i32;
                 r += p.lmr_cut_node * cut_node as i32;
                 r -= p.lmr_tt_pv * tt_pv as i32;
-                r -= p.lmr_check * board.in_check(board.side_to_move) as i32;
+                let gives_check = board.in_check(board.side_to_move);
+                r -= p.lmr_check * gives_check as i32;
                 r += p.lmr_tt_capture * tt_move.is_some_and(|t| t.is_capture()) as i32;
+                // Static eval after the move, from our side: a rise earns depth back, a clear drop costs more.
+                if let (Some(se), false) = (static_eval, gives_check) {
+                    let raw = tt.probe(board.hash).and_then(|e| e.eval()).unwrap_or_else(|| ctx.accs.evaluate(board));
+                    ctx.child_eval = Some((board.hash, raw));
+                    let delta = -ctx.corrected_eval(board, raw) - se;
+                    if delta > 0 && r >= p.lmr_eval_gain_min {
+                        r -= p.lmr_eval_gain;
+                    } else if delta < -p.lmr_eval_drop_margin {
+                        r += p.lmr_eval_drop;
+                    }
+                }
                 reduced = (new_depth as i32 - r / 1024).clamp(1, new_depth.max(1) as i32) as u32;
             }
 

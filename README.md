@@ -11,7 +11,7 @@ Banksia, fastchess, ...).
 - Transposition table (4-entry buckets, 64 MB by default), backed by huge pages on Linux
 - Null move pruning, razoring, reverse futility pruning, futility pruning, late move pruning,
   SEE pruning, ProbCut
-- Late move reductions with history adjustment
+- Late move reductions adjusted by history and by how the static eval changes after the move
 - Singular extensions with multi-cut, internal iterative reductions
 - Move ordering by TT move, SEE-scored captures, killers, history and continuation history
 - Pawn-structure correction history for the static eval
