@@ -116,6 +116,183 @@ fn screlu_dot(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], head: &[i16; 2 * N_H
     screlu_dot_scalar(us, them, head, qa)
 }
 
+const H: usize = N_HIDDEN / 2;
+type L1Weights = [[i8; 4 * L1]; N_HIDDEN / 4];
+const _: () = assert!(L1 == 16 && H.is_multiple_of(32), "dense SIMD paths assume L1 = 16 and 32-wide halves");
+
+// (clamp(a) * clamp(b)) >> 9 of each side's accumulator halves, side to move first; at most 127,
+// so maddubs pairs can't saturate.
+fn pairwise_scalar(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: &mut [u8; N_HIDDEN]) {
+    for (side, src) in [us, them].into_iter().enumerate() {
+        for i in 0..H {
+            let a = src[i].clamp(0, QA as i16) as i32;
+            let b = src[H + i].clamp(0, QA as i16) as i32;
+            act[side * H + i] = ((a * b) >> 9) as u8;
+        }
+    }
+}
+
+// mulhi(a << 7, b) is exactly (a * b) >> 9; packus interleaves 128-bit lanes, the permute undoes it.
+// Also lists the 4-byte groups with any nonzero byte into `nz` (8 slack slots for the index
+// stores) and returns their count.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn pairwise_avx2(
+    us: &[i16; N_HIDDEN],
+    them: &[i16; N_HIDDEN],
+    act: &mut [u8; N_HIDDEN],
+    nz: &mut [u16; N_HIDDEN / 4 + 8],
+) -> usize {
+    use std::arch::x86_64::*;
+    let zero = _mm256_setzero_si256();
+    let max = _mm256_set1_epi16(QA as i16);
+    let mut n = 0;
+    for (side, src) in [us, them].into_iter().enumerate() {
+        let p = src.as_ptr();
+        let pair = |off: usize| {
+            let a = _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256(p.add(off) as *const __m256i), zero), max);
+            let b = _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256(p.add(H + off) as *const __m256i), zero), max);
+            _mm256_mulhi_epi16(_mm256_slli_epi16(a, 7), b)
+        };
+        for c in 0..H / 32 {
+            let packed = _mm256_packus_epi16(pair(c * 32), pair(c * 32 + 16));
+            let v = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
+            let at = side * H + c * 32;
+            _mm256_storeu_si256(act.as_mut_ptr().add(at) as *mut __m256i, v);
+            let m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(v, zero))) as usize;
+            let idx = _mm_loadu_si128(MASK_INDICES[m].as_ptr() as *const __m128i);
+            _mm_storeu_si128(nz.as_mut_ptr().add(n) as *mut __m128i, _mm_add_epi16(idx, _mm_set1_epi16((at / 4) as i16)));
+            n += m.count_ones() as usize;
+        }
+    }
+    n
+}
+
+// Set-bit positions of every 8-bit mask, so a mask's indices are written in one store.
+static MASK_INDICES: [[u16; 8]; 256] = {
+    let mut t = [[0u16; 8]; 256];
+    let mut m = 0;
+    while m < 256 {
+        let (mut bit, mut n) = (0, 0);
+        while bit < 8 {
+            if m & (1 << bit) != 0 {
+                t[m][n] = bit as u16;
+                n += 1;
+            }
+            bit += 1;
+        }
+        m += 1;
+    }
+    t
+};
+
+// Sparse L1 over the nonzero groups: each group's 4 bytes broadcast against its 16 x 4 weights.
+macro_rules! l1_sparse {
+    ($name:ident, $features:literal, $dot:expr) => {
+        #[cfg(target_arch = "x86_64")]
+        #[target_feature(enable = $features)]
+        unsafe fn $name(act: &[u8; N_HIDDEN], nz: &[u16], w: &L1Weights) -> [i32; L1] {
+            use std::arch::x86_64::*;
+            let n = nz.len();
+            let groups = act.as_ptr() as *const i32;
+            let z = _mm256_setzero_si256();
+            // Two groups per step into separate accumulators, to halve the dependency chains.
+            let (mut a0, mut a1, mut b0, mut b1) = (z, z, z, z);
+            let mut i = 0;
+            while i + 1 < n {
+                let (g, h) = (nz[i] as usize, nz[i + 1] as usize);
+                let x = _mm256_set1_epi32(groups.add(g).read_unaligned());
+                let y = _mm256_set1_epi32(groups.add(h).read_unaligned());
+                let wg = w[g].as_ptr() as *const __m256i;
+                let wh = w[h].as_ptr() as *const __m256i;
+                a0 = $dot(a0, x, _mm256_loadu_si256(wg));
+                a1 = $dot(a1, x, _mm256_loadu_si256(wg.add(1)));
+                b0 = $dot(b0, y, _mm256_loadu_si256(wh));
+                b1 = $dot(b1, y, _mm256_loadu_si256(wh.add(1)));
+                i += 2;
+            }
+            if i < n {
+                let g = nz[i] as usize;
+                let x = _mm256_set1_epi32(groups.add(g).read_unaligned());
+                let wg = w[g].as_ptr() as *const __m256i;
+                a0 = $dot(a0, x, _mm256_loadu_si256(wg));
+                a1 = $dot(a1, x, _mm256_loadu_si256(wg.add(1)));
+            }
+            let (a0, a1) = (_mm256_add_epi32(a0, b0), _mm256_add_epi32(a1, b1));
+            let mut out = [0i32; L1];
+            _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, a0);
+            _mm256_storeu_si256(out.as_mut_ptr().add(8) as *mut __m256i, a1);
+            out
+        }
+    };
+}
+l1_sparse!(l1_avxvnni, "avx2,avxvnni", |a, x, w| _mm256_dpbusd_avx_epi32(a, x, w));
+l1_sparse!(l1_avx512vnni, "avx2,avx512vnni,avx512vl", |a, x, w| _mm256_dpbusd_epi32(a, x, w));
+l1_sparse!(l1_avx2, "avx2", |a, x, w| _mm256_add_epi32(
+    a,
+    _mm256_madd_epi16(_mm256_maddubs_epi16(x, w), _mm256_set1_epi16(1))
+));
+
+fn l1_scalar(act: &[u8; N_HIDDEN], w: &L1Weights) -> [i32; L1] {
+    let mut out = [0i32; L1];
+    for (g, gw) in w.iter().enumerate() {
+        for (j, o) in out.iter_mut().enumerate() {
+            for t in 0..4 {
+                *o += act[g * 4 + t] as i32 * gw[j * 4 + t] as i32;
+            }
+        }
+    }
+    out
+}
+
+// Pairwise CReLU of each side's accumulator halves -> L1 -> SCReLU -> L2 -> SCReLU -> output.
+fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i32 {
+    let d = &WEIGHTS.dense[0];
+    let mut act = [0u8; N_HIDDEN];
+    let l1w = &d.l1w[bucket];
+    let s: [i32; L1];
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            unsafe {
+                let mut nz = [0u16; N_HIDDEN / 4 + 8];
+                let n = pairwise_avx2(us, them, &mut act, &mut nz);
+                let nz = &nz[..n];
+                s = if std::is_x86_feature_detected!("avxvnni") {
+                    l1_avxvnni(&act, nz, l1w)
+                } else if std::is_x86_feature_detected!("avx512vnni") && std::is_x86_feature_detected!("avx512vl") {
+                    l1_avx512vnni(&act, nz, l1w)
+                } else {
+                    l1_avx2(&act, nz, l1w)
+                };
+            }
+        } else {
+            pairwise_scalar(us, them, &mut act);
+            s = l1_scalar(&act, l1w);
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        pairwise_scalar(us, them, &mut act);
+        s = l1_scalar(&act, l1w);
+    }
+
+    let mut h2 = d.l2b[bucket];
+    for j in 0..L1 {
+        let x = (s[j] as f32 * d.l1_dequant[bucket][j] + d.l1b[bucket][j]).clamp(0.0, 1.0);
+        let h = x * x;
+        for (o, &w) in h2.iter_mut().zip(&d.l2w[bucket][j]) {
+            *o += h * w;
+        }
+    }
+    let mut out = d.l3b[bucket];
+    for (&x, &w) in h2.iter().zip(&d.l3w[bucket]) {
+        let x = x.clamp(0.0, 1.0);
+        out += w * x * x;
+    }
+    (out * OUT_SCALE as f32).round() as i32
+}
+
 // Where one side's features live: its king bucket's 768 rows, and a file flip
 // when its king stands on files e-h of a mirrored net.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -312,6 +489,9 @@ impl Accumulator {
 
     pub fn evaluate(&self, stm: Color, bucket: usize) -> i32 {
         let (us, them) = if stm == Color::White { (&self.white, &self.black) } else { (&self.black, &self.white) };
+        if DENSE {
+            return dense_eval(us, them, bucket);
+        }
         let w = &*WEIGHTS;
         let sum = if SCRELU {
             let sq = screlu_dot(us, them, &w.head_weights_i16[bucket], QA as i16);
@@ -441,6 +621,47 @@ impl AccStack {
 mod tests {
     use super::*;
     use crate::chess::{Board, MoveList};
+
+    // Every SIMD path this CPU supports must match the scalar dense layers bit for bit.
+    #[test]
+    fn dense_simd_matches_scalar() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            s
+        };
+        for _ in 0..50 {
+            let us: [i16; N_HIDDEN] = std::array::from_fn(|_| (next() % 700) as i16 - 200);
+            let them: [i16; N_HIDDEN] = std::array::from_fn(|_| (next() % 700) as i16 - 200);
+            let w: Box<L1Weights> = Box::new(std::array::from_fn(|_| std::array::from_fn(|_| (next() % 255) as i8)));
+            let mut want = [0u8; N_HIDDEN];
+            pairwise_scalar(&us, &them, &mut want);
+            let l1_want = l1_scalar(&want, &w);
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                use std::is_x86_feature_detected as has;
+                if !has!("avx2") {
+                    continue;
+                }
+                let mut got = [0u8; N_HIDDEN];
+                let mut nz = [0u16; N_HIDDEN / 4 + 8];
+                let n = pairwise_avx2(&us, &them, &mut got, &mut nz);
+                assert_eq!(got, want);
+                let nz_want: Vec<u16> = (0..N_HIDDEN / 4).filter(|&g| want[g * 4..g * 4 + 4] != [0; 4]).map(|g| g as u16).collect();
+                assert_eq!(&nz[..n], &nz_want[..]);
+                let nz = &nz[..n];
+                assert_eq!(l1_avx2(&want, nz, &w), l1_want);
+                if has!("avxvnni") {
+                    assert_eq!(l1_avxvnni(&want, nz, &w), l1_want);
+                }
+                if has!("avx512vnni") && has!("avx512vl") {
+                    assert_eq!(l1_avx512vnni(&want, nz, &w), l1_want);
+                }
+            }
+        }
+    }
 
     fn assert_incremental_matches_recompute(fen: &str) {
         let mut board = Board::from_fen(fen).unwrap();

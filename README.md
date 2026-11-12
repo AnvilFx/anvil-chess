@@ -8,7 +8,7 @@ Banksia, fastchess, ...).
 
 **Search**
 - Iterative deepening, principal variation search, aspiration windows
-- Transposition table (4-entry buckets, 64 MB by default)
+- Transposition table (4-entry buckets, 64 MB by default), backed by huge pages on Linux
 - Null move pruning, razoring, reverse futility pruning, futility pruning, late move pruning,
   SEE pruning, ProbCut
 - Late move reductions with history adjustment
@@ -21,7 +21,7 @@ Banksia, fastchess, ...).
 **Evaluation**
 - NNUE `(768x4 -> 1024)x2 -> 1x8`: four king buckets with horizontal mirroring,
   SCReLU activation, eight output buckets by piece count
-- Trained on 1.5B positions from Anvil's own self-play
+- Trained on 2.2B positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
 
@@ -89,11 +89,13 @@ The non-standard `eval` command prints the static NNUE eval of the current posit
 ## The net
 
 The net in `src/eval/net.nnue` is trained with
-[bullet](https://github.com/jw1912/bullet) on 1.5 billion deduplicated positions from
+[bullet](https://github.com/jw1912/bullet) on 2.2 billion deduplicated positions from
 Anvil's own self-play games, labelled with its own search scores and game results. No
 other engine's data or evals are used.
 
 - `tools/train/anvil.rs` is the bullet training config.
+- `tools/train/anvil_dense.rs` and `nets/bullet-kb4-dense.json` are an experimental net with
+  dense layers after the accumulator; the engine runs it with `DENSE = true` in `params.rs`.
 - `tools/gen_net.py` quantizes a trained net into `net.nnue`. The header carries the
   quantization and bucket settings, so swapping in a net of the same shape needs no
   code changes.
@@ -101,7 +103,7 @@ other engine's data or evals are used.
   regenerated:
 
 ```sh
-python tools/gen_net.py nets/bullet-kb4-hl1024-1501m.bin nets/bullet-kb4.json src/eval/net.nnue
+python tools/gen_net.py nets/bullet-kb4-hl1024-2177m.bin nets/bullet-kb4.json src/eval/net.nnue
 cargo build --release
 ```
 

@@ -1,5 +1,6 @@
 pub mod chess;
 pub mod eval;
+pub mod mem;
 pub mod search;
 pub mod timeman;
 pub mod uci;
