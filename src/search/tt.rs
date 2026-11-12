@@ -48,7 +48,7 @@ impl TtEntry {
 pub(super) struct Bucket([TtEntry; BUCKET_SIZE]);
 
 pub struct Tt {
-    pub(super) buckets: Vec<Bucket>,
+    pub(super) buckets: crate::mem::HugeBuf<Bucket>,
     pub(super) mask: u64,
     pub(super) gen: u8,
 }
@@ -68,7 +68,8 @@ impl Tt {
     pub fn with_mb(mb: usize) -> Self {
         let wanted = (mb.clamp(1, TT_MAX_MB) * 1024 * 1024 / std::mem::size_of::<Bucket>()).max(1);
         let n = 1usize << (usize::BITS - 1 - wanted.leading_zeros());
-        Self { buckets: vec![Bucket::default(); n], mask: (n - 1) as u64, gen: 0 }
+        // All-zero bytes are an empty entry.
+        Self { buckets: unsafe { crate::mem::HugeBuf::zeroed(n) }, mask: (n - 1) as u64, gen: 0 }
     }
 
     pub(super) fn clear(&mut self) {

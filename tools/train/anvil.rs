@@ -3,7 +3,7 @@
 // (factorised) and output buckets by piece count.
 // Saves plain f32 weights; tools/gen_net.py quantises them for the engine.
 //
-//   cargo r -r --features cuda --example anvil -- <data file> [superbatches] [net id]
+//   cargo r -r --features cuda --example anvil -- <data file> [superbatches] [net id] [resume superbatch]
 use bullet_lib::{
     game::{
         inputs::{ChessBucketsMirrored, get_num_buckets},
@@ -44,6 +44,8 @@ fn main() {
     let dataset_path = args.get(1).map(String::as_str).unwrap_or("data/kb4-train.data");
     let superbatches: usize = args.get(2).map_or(60, |s| s.parse().expect("superbatches"));
     let net_id = args.get(3).cloned().unwrap_or_else(|| "anvil-kb4".to_string());
+    // Optional: resume from checkpoints/<net id>-<n> at superbatch n + 1.
+    let resume: Option<usize> = args.get(4).map(|s| s.parse().expect("resume superbatch"));
 
     // Share of the target taken from the game result (the rest from the score).
     let wdl_proportion = 0.3;
@@ -84,13 +86,17 @@ fn main() {
     trainer.optimiser.set_params_for_weight("l0w", stricter_clipping);
     trainer.optimiser.set_params_for_weight("l0f", stricter_clipping);
 
+    if let Some(n) = resume {
+        trainer.load_from_checkpoint(&format!("checkpoints/{net_id}-{n}"));
+    }
+
     let schedule = TrainingSchedule {
         net_id,
         eval_scale: 400.0,
         steps: TrainingSteps {
             batch_size: 16_384,
             batches_per_superbatch: 6104,
-            start_superbatch: 1,
+            start_superbatch: resume.map_or(1, |n| n + 1),
             end_superbatch: superbatches,
         },
         wdl_scheduler: wdl::ConstantWDL { value: wdl_proportion },
