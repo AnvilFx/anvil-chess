@@ -27,6 +27,8 @@ pub(super) struct SearchCtx {
     pub(super) played: [Option<(u8, u8)>; MAX_PLY],
     /// Static eval at each ply of the current path; None when in check.
     pub(super) evals: [Option<i32>; MAX_PLY],
+    /// Raw eval of a child the parent already evaluated for LMR, keyed by hash, so the child skips it.
+    pub(super) child_eval: Option<(u64, i32)>,
     /// How far search results have strayed from the raw eval, per side to move and pawn structure.
     pub(super) corr: Box<[[i16; CORR_SIZE]; 2]>,
     /// Hashes from game start to the parent of the current node.
@@ -58,6 +60,7 @@ impl SearchCtx {
             cont: ContHist::new(),
             played: [None; MAX_PLY],
             evals: [None; MAX_PLY],
+            child_eval: None,
             corr: Box::new([[0; CORR_SIZE]; 2]),
             hashes: Vec::with_capacity(MAX_PLY + 64),
             root_idx: 0,
@@ -89,6 +92,7 @@ impl SearchCtx {
         self.pv_len = [0; MAX_PLY + 1];
         self.played = [None; MAX_PLY];
         self.evals = [None; MAX_PLY];
+        self.child_eval = None;
         self.accs.init(board);
         self.hashes.clear();
         self.hashes.extend_from_slice(history);
