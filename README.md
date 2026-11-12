@@ -46,7 +46,8 @@ hardware than CCRL.
 | 3.14.1 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 216 / 480 / 304 | -31 ± 16 | ~3613 |
 | 3.14.1 | Black Marlin 9.0 | 3622 | 20+0.2 | 1000 | 322 / 478 / 200 | +43 ± 16 | ~3665 |
 | 3.14.1 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 410 / 408 / 182 | +81 ± 17 | ~3672 |
-| **Average** | | | | | | | **~3632** |
+| 3.14.1 | Lambergar 1.5 | 3506 | 20+0.2 | 1000 | 630 / 310 / 60 | +225 ± 19 | ~3731 |
+| **Average** | | | | | | | **~3644** |
 
 Single thread for both engines, games played in colour-swapped opening pairs on an
 AMD EPYC 9R14 server running 186 games at a time. Error bars are 95%, from W / D / L.
