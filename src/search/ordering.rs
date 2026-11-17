@@ -41,6 +41,7 @@ pub(super) fn score_move(
     tt_move: Option<Move>,
     ctx: &SearchCtx,
     ply: usize,
+    rows: &HistRows,
 ) -> i32 {
     if tt_move == Some(m) {
         return 2_000_000;
@@ -48,8 +49,23 @@ pub(super) fn score_move(
     if pv == Some(m) {
         return 1_000_000;
     }
+    score_plain(m, board, &killers_at(ctx, ply), ctx, rows)
+}
+
+#[inline]
+fn killers_at(ctx: &SearchCtx, ply: usize) -> [Option<Move>; 2] {
+    if ply < MAX_PLY {
+        ctx.killers[ply]
+    } else {
+        [None; 2]
+    }
+}
+
+/// score_move for a move that is neither the TT nor the PV move.
+#[inline]
+fn score_plain(m: Move, board: &Board, killers: &[Option<Move>; 2], ctx: &SearchCtx, rows: &HistRows) -> i32 {
     if m.is_capture() {
-        let see_val = see(board, m);
+        let see_val = see_with_threats(board, m, rows.threats);
         if see_val >= 0 {
             return 100_000 + see_val;
         } else {
@@ -66,15 +82,13 @@ pub(super) fn score_move(
                 _ => 0,
             };
     }
-    if ply < MAX_PLY {
-        if ctx.killers[ply][0] == Some(m) {
-            return 40_000;
-        }
-        if ctx.killers[ply][1] == Some(m) {
-            return 39_000;
-        }
+    if killers[0] == Some(m) {
+        return 40_000;
     }
-    quiet_history(ctx, board, m, ply)
+    if killers[1] == Some(m) {
+        return 39_000;
+    }
+    rows.get(ctx, board, m)
 }
 
 pub(super) struct ScoredMoves {
@@ -93,63 +107,44 @@ impl ScoredMoves {
         }
     }
 
-    // Like from_list, but the TT move goes first right away (as pop_best(0) would) and
-    // the rest wait for score_deferred, since the TT move often cuts. Without a TT move
-    // only the captures' SEE scores wait.
-    pub(super) fn tt_move_first(
+    // Fills an empty list like from_list, but the TT move goes first right away (as pop_best(0)
+    // would) and the rest wait for score_deferred, since the TT move often cuts. In place, since
+    // returning the list copies 2 KB.
+    pub(super) fn fill_tt_move_first(
+        &mut self,
         list: &MoveList,
         board: &Board,
         tt_move: Option<Move>,
         ctx: &SearchCtx,
         ply: usize,
-    ) -> Self {
-        let mut sm = Self::empty();
-        let mut tt_idx = None;
-        for i in 0..list.len() {
-            let m = list.get(i);
-            let s = if Some(m) == tt_move {
-                tt_idx = Some(i);
-                2_000_000
-            } else if m.is_capture() || tt_move.is_some() {
-                0
-            } else {
-                score_move(m, board, None, tt_move, ctx, ply)
-            };
-            sm.push(m, s);
-        }
-        match tt_idx {
-            Some(k) => {
-                sm.data.swap(0, k);
-                sm.deferred = true;
-            }
-            None => {
-                sm.deferred = true;
-                sm.score_deferred_from(0, tt_move.is_some(), board, ctx, ply);
-            }
-        }
-        sm
-    }
-
-    pub(super) fn score_deferred(&mut self, board: &Board, ctx: &SearchCtx, ply: usize) {
-        self.score_deferred_from(1, true, board, ctx, ply);
-    }
-
-    pub(super) fn score_deferred_from(
-        &mut self,
-        start: usize,
-        quiets: bool,
-        board: &Board,
-        ctx: &SearchCtx,
-        ply: usize,
+        rows: &HistRows,
     ) {
-        for i in start..self.len {
-            let (m, _) = unsafe { self.data[i].assume_init() };
-            if quiets || m.is_capture() {
-                self.data[i] = MaybeUninit::new((m, score_move(m, board, None, None, ctx, ply)));
+        let n = list.len();
+        if let Some(k) = tt_move.and_then(|t| (0..n).position(|i| list.get(i) == t)) {
+            for i in 0..n {
+                self.push(list.get(i), 0);
             }
+            self.data.swap(0, k);
+            self.data[0] = MaybeUninit::new((list.get(k), 2_000_000));
+            self.deferred = true;
+        } else {
+            let killers = killers_at(ctx, ply);
+            for i in 0..n {
+                let m = list.get(i);
+                self.push(m, score_plain(m, board, &killers, ctx, rows));
+            }
+        }
+    }
+
+    pub(super) fn score_deferred(&mut self, board: &Board, ctx: &SearchCtx, ply: usize, rows: &HistRows) {
+        let killers = killers_at(ctx, ply);
+        for i in 1..self.len {
+            let (m, _) = unsafe { self.data[i].assume_init() };
+            self.data[i] = MaybeUninit::new((m, score_plain(m, board, &killers, ctx, rows)));
         }
         self.deferred = false;
     }
+
 
     #[inline]
     pub(super) fn push(&mut self, m: Move, score: i32) {
@@ -170,9 +165,10 @@ impl ScoredMoves {
             len: list.len(),
             deferred: false,
         };
+        let rows = HistRows::new(ctx, board, ply);
         for i in 0..list.len() {
             let m = list.get(i);
-            sm.data[i] = MaybeUninit::new((m, score_move(m, board, pv, tt_move, ctx, ply)));
+            sm.data[i] = MaybeUninit::new((m, score_move(m, board, pv, tt_move, ctx, ply, &rows)));
         }
         sm
     }
@@ -193,6 +189,10 @@ impl ScoredMoves {
     }
 
     pub(super) fn pop_best(&mut self, start: usize) -> (Move, i32) {
+        // Still deferred means the TT move sits at 0 and outscores everything.
+        if self.deferred {
+            return unsafe { self.data[start].assume_init() };
+        }
         let mut best = start;
         let mut best_score = unsafe { self.data[start].assume_init().1 };
         for i in (start + 1)..self.len {

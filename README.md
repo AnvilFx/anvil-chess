@@ -24,7 +24,7 @@ Banksia, fastchess, ...).
   float layers after it, eight output buckets by piece count
 - Trained on 3.6B positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
-- AVX2, AVX-VNNI and AVX-512 VNNI paths selected at runtime, with a scalar fallback
+- AVX2, AVX-VNNI and AVX-512 paths selected at runtime, with a scalar fallback
 
 ## Strength
 
@@ -40,17 +40,17 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
-| 3.15.0 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 22 / 441 / 537 | -198 ± 16 | ~3569 |
-| 3.15.0 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 38 / 470 / 492 | -170 ± 15 | ~3572 |
-| 3.15.0 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 121 / 505 / 374 | -90 ± 15 | ~3630 |
-| 3.15.0 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 109 / 474 / 417 | -111 ± 16 | ~3590 |
-| 3.15.0 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 291 / 405 / 304 | -5 ± 17 | ~3651 |
-| 3.15.0 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 341 / 450 / 209 | +46 ± 16 | ~3697 |
-| 3.15.0 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 287 / 431 / 282 | +2 ± 16 | ~3653 |
-| 3.15.0 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 277 / 470 / 253 | +8 ± 16 | ~3652 |
-| 3.15.0 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 404 / 460 / 136 | +95 ± 16 | ~3717 |
-| 3.15.0 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 500 / 351 / 149 | +127 ± 18 | ~3718 |
-| **Average** | | | | | | | **~3645** |
+| 3.15.1 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 40 / 442 / 518 | -181 ± 16 | ~3586 |
+| 3.15.1 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 55 / 458 / 487 | -161 ± 16 | ~3581 |
+| 3.15.1 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 158 / 467 / 375 | -77 ± 16 | ~3643 |
+| 3.15.1 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 126 / 485 / 389 | -94 ± 15 | ~3607 |
+| 3.15.1 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 334 / 410 / 256 | +27 ± 17 | ~3683 |
+| 3.15.1 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 379 / 417 / 204 | +61 ± 17 | ~3712 |
+| 3.15.1 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 317 / 452 / 231 | +30 ± 16 | ~3681 |
+| 3.15.1 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 278 / 522 / 200 | +27 ± 15 | ~3671 |
+| 3.15.1 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 422 / 444 / 134 | +103 ± 16 | ~3725 |
+| 3.15.1 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 524 / 330 / 146 | +138 ± 18 | ~3729 |
+| **Average** | | | | | | | **~3662** |
 
 Single thread for both engines, games played in colour-swapped opening pairs from the
 UHO 2024 book on an AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%,
@@ -60,7 +60,8 @@ The opponents are picked to sit above and below Anvil, because these unbalanced 
 stretch Elo differences compared with CCRL: strong opponents give low estimates, weak ones
 high. Earlier versions were measured against a weaker field (with Lambergar 1.5, and Black
 Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On this field
-3.15.0 is lower, but head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at 5+0.05).
+3.15.0 measured ~3645, though head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at
+5+0.05). 3.15.1 searches the same tree 18-28% faster and beats 3.15.0 by +44 ± 16 at 10+0.1.
 
 ## Downloads
 
@@ -83,7 +84,9 @@ so the binary is all you need.
 
 `.cargo/config.toml` builds with `target-cpu=native`, which is fastest but may not run
 on older CPUs than the build machine. For a portable binary, change it to
-`target-cpu=x86-64-v3` (AVX2, most CPUs since 2015) or `x86-64-v2`.
+`target-cpu=x86-64-v3` (AVX2, most CPUs since 2015) or `x86-64-v2`. It also sets
+`--cfg pext`, which uses PEXT for slider attacks. That is fast on Intel and AMD Zen 3 and
+newer but very slow on Zen 1 and Zen 2, so remove it when building for those.
 
 ## UCI
 
@@ -122,7 +125,8 @@ cargo build --release
 ```
 
 `--permute` takes a file of self-play positions (`FEN | score | result` lines) and orders
-the hidden neurons by how often they are active, which makes the sparse first layer faster.
+the hidden neurons by how often they are active, then swaps neurons between groups of four
+so that more groups are all zero, which makes the sparse first layer faster.
 Any sample gives the same evals; only the same sample gives the same bytes.
 
 A different hidden width or output bucket count also needs `N_HIDDEN` / `N_BUCKETS` in

@@ -23,6 +23,75 @@ pub(super) fn is_repetition(hash: u64, hmc: u16, hashes: &[u64], root: usize, fl
     false
 }
 
+/// The side to move is in check; reuses the parent's answer when it already asked.
+#[inline]
+fn stm_in_check(board: &Board, ctx: &SearchCtx) -> bool {
+    match ctx.child_check {
+        Some((h, c)) if h == board.hash => c,
+        _ => board.in_check(board.side_to_move),
+    }
+}
+
+/// True only if `m` is in the `gen_legal_into` list; may also say false for some legal moves
+/// (castling, en passant, or any move while in check), which then go through full generation.
+pub(super) fn tt_move_is_legal(board: &Board, m: Move, in_check: bool) -> bool {
+    if in_check {
+        return false;
+    }
+    let stm = board.side_to_move;
+    let (us, them) = (stm.idx(), stm.opp().idx());
+    let (from, to, flag) = (m.from(), m.to(), m.flag());
+    let Some(pc) = board.piece_at(from) else { return false };
+    let to_bb = to.bb();
+    if pc.color != stm || to_bb & board.color_bb[us] != 0 || to_bb & board.piece_bb[them][PieceKind::King.idx()] != 0 {
+        return false;
+    }
+    let capture = to_bb & board.color_bb[them] != 0;
+    let occ = board.occupancy;
+    let plain = flag == if capture { Move::CAPTURE } else { Move::QUIET };
+    let pseudo = match pc.kind {
+        PieceKind::Pawn => {
+            let (step, start_rank, promo_rank) = if stm == Color::White { (8, 1, 7) } else { (-8, 6, 0) };
+            let one = from.0 as i32 + step;
+            if m.is_promotion() != (to.rank() == promo_rank) {
+                false
+            } else if capture {
+                (flag == Move::CAPTURE || flag >= Move::PROMO_CAP_KNIGHT) && PAWN_ATTACKS[us][from.idx()] & to_bb != 0
+            } else if flag == Move::DOUBLE_PUSH {
+                from.rank() == start_rank && to.0 as i32 == one + step && occ & (1u64 << one) == 0
+            } else {
+                (flag == Move::QUIET || (Move::PROMO_KNIGHT..=Move::PROMO_QUEEN).contains(&flag)) && to.0 as i32 == one
+            }
+        }
+        PieceKind::Knight => plain && KNIGHT_ATTACKS[from.idx()] & to_bb != 0,
+        PieceKind::Bishop => plain && bishop_attacks(from, occ) & to_bb != 0,
+        PieceKind::Rook => plain && rook_attacks(from, occ) & to_bb != 0,
+        PieceKind::Queen => plain && (bishop_attacks(from, occ) | rook_attacks(from, occ)) & to_bb != 0,
+        PieceKind::King => plain && KING_ATTACKS[from.idx()] & to_bb != 0,
+    };
+    if !pseudo {
+        return false;
+    }
+    let bb = &board.piece_bb[them];
+    let diag = (bb[PieceKind::Bishop.idx()] | bb[PieceKind::Queen.idx()]) & !to_bb;
+    let orth = (bb[PieceKind::Rook.idx()] | bb[PieceKind::Queen.idx()]) & !to_bb;
+    if pc.kind == PieceKind::King {
+        // The target must not be attacked once the king has left its square.
+        let occ = occ ^ from.bb();
+        let t = to.idx();
+        return (PAWN_ATTACKS[us][t] & bb[PieceKind::Pawn.idx()])
+            | (KNIGHT_ATTACKS[t] & bb[PieceKind::Knight.idx()])
+            | (KING_ATTACKS[t] & bb[PieceKind::King.idx()])
+            | (bishop_attacks(to, occ) & diag)
+            | (rook_attacks(to, occ) & orth)
+            == 0;
+    }
+    // Not in check, so only a slider behind `from` on a line to the king can become a checker.
+    let king = lsb(board.piece_bb[us][PieceKind::King.idx()]);
+    let occ = (occ ^ from.bb()) | to_bb;
+    (bishop_attacks(king, occ) & diag) | (rook_attacks(king, occ) & orth) == 0
+}
+
 /// Only dead draws (K vs K, K+minor vs K); KN vs KN and similar are left to eval.
 #[inline]
 pub(super) fn is_insufficient_material(board: &Board) -> bool {
@@ -220,7 +289,7 @@ pub(super) fn negamax(
         }
         if board.halfmove_clock >= 100 {
             // Checkmate takes precedence over the fifty-move rule.
-            if !board.in_check(board.side_to_move) {
+            if !stm_in_check(board, ctx) {
                 return 0;
             }
             let mut ml = MoveList::new();
@@ -273,7 +342,7 @@ pub(super) fn negamax(
         depth -= 1;
     }
 
-    let in_check = board.in_check(board.side_to_move);
+    let in_check = stm_in_check(board, ctx);
     let p = ctx.params;
     let cached = ctx.child_eval.filter(|c| c.0 == hash).map(|c| c.1);
     let raw_eval = if in_check { None } else { Some(tt_eval.or(cached).unwrap_or_else(|| ctx.accs.evaluate(board))) };
@@ -363,7 +432,7 @@ pub(super) fn negamax(
         for k in 0..noisy.len() {
             let m = noisy.get(k);
             // Only moves whose material swing alone can bridge the gap to pc_beta.
-            if see(board, m) >= pc_beta - se {
+            if see_ge(board, m, pc_beta - se) {
                 pc.push(m, if Some(m) == tt_move { 1_000_000 } else { qscore(m, board) });
             }
         }
@@ -396,17 +465,27 @@ pub(super) fn negamax(
         }
     }
 
+    // A legal TT move is searched before the rest are generated, since it often cuts.
+    let early_tt = tt_move.filter(|&m| tt_move_is_legal(board, m, in_check));
     let mut moves = MoveList::new();
-    board.gen_legal_into(&mut moves);
-    if moves.is_empty() {
-        if in_check {
-            return -MATE_SCORE + ply_i;
+    if early_tt.is_none() {
+        board.gen_legal_into(&mut moves);
+        if moves.is_empty() {
+            if in_check {
+                return -MATE_SCORE + ply_i;
+            }
+            return 0;
         }
-        return 0;
     }
 
-    ctx.threats[ply_us] = threat_map(board);
-    let mut sm = ScoredMoves::tt_move_first(&moves, board, tt_move, ctx, ply_us);
+    let threats = threat_map(board);
+    ctx.threats[ply_us] = threats;
+    let rows = HistRows::new(ctx, board, ply_us);
+    let mut sm = ScoredMoves::empty();
+    match early_tt {
+        Some(m) => sm.push(m, 2_000_000),
+        None => sm.fill_tt_move_first(&moves, board, tt_move, ctx, ply_us, &rows),
+    }
     let mut best_move: Option<Move> = None;
     let mut best_score = -INF;
     let mut searched_quiets: [Move; 64] = [Move(0); 64];
@@ -415,11 +494,16 @@ pub(super) fn negamax(
     // Quiets dropped once pruning covers them all; they still count toward the move index.
     let mut skipped = 0usize;
     for slot in 0.. {
+        if slot == 1 && early_tt.is_some() {
+            board.gen_legal_into(&mut moves);
+            sm.len = 0;
+            sm.fill_tt_move_first(&moves, board, tt_move, ctx, ply_us, &rows);
+        }
         if slot >= sm.len {
             break;
         }
         if slot == 1 && sm.deferred {
-            sm.score_deferred(board, ctx, ply_us);
+            sm.score_deferred(board, ctx, ply_us, &rows);
         }
         let i = slot + skipped;
         let (m, move_score) = sm.pop_best(slot);
@@ -429,7 +513,7 @@ pub(super) fn negamax(
 
         // Never prune while best_score is a mated score, so forced lines survive.
         let is_quiet = !m.is_capture() && !m.is_promotion();
-        let move_hist = if i > 0 && is_quiet { quiet_history(ctx, board, m, ply_us) } else { 0 };
+        let move_hist = if i > 0 && is_quiet { rows.get(ctx, board, m) } else { 0 };
         if i > 0 && !in_check && best_score > -MATE_THRESHOLD {
             if is_quiet
                 && depth <= p.lmp_max_depth as u32
@@ -448,8 +532,16 @@ pub(super) fn negamax(
             if depth <= p.see_max_depth as u32 {
                 let margin = if is_quiet { p.see_quiet_margin } else { p.see_capt_margin };
                 // Past the TT move a capture's score already holds its SEE.
-                let see_val = if m.is_capture() { see_from_score(move_score) } else { see(board, m) };
-                if see_val < -(margin * depth as i32) {
+                let bound = -(margin * depth as i32);
+                // A quiet move between squares the opponent doesn't attack can't be recaptured, so its SEE is 0.
+                let losing = if m.is_capture() {
+                    see_from_score(move_score) < bound
+                } else if threats & (m.from().bb() | m.to().bb()) == 0 && !m.is_promotion() {
+                    bound > 0
+                } else {
+                    !see_ge(board, m, bound)
+                };
+                if losing {
                     continue;
                 }
             }
@@ -535,6 +627,7 @@ pub(super) fn negamax(
                 r += p.lmr_cut_node * cut_node as i32;
                 r -= p.lmr_tt_pv * tt_pv as i32;
                 let gives_check = board.in_check(board.side_to_move);
+                ctx.child_check = Some((board.hash, gives_check));
                 r -= p.lmr_check * gives_check as i32;
                 r += p.lmr_tt_capture * tt_move.is_some_and(|t| t.is_capture()) as i32;
                 // Static eval after the move, from our side: a rise earns depth back, a clear drop costs more.
@@ -665,7 +758,7 @@ pub(super) fn qsearch(board: &mut Board, mut alpha: i32, beta: i32, ply: u32, ct
         }
     }
 
-    let in_check = board.in_check(board.side_to_move);
+    let in_check = stm_in_check(board, ctx);
 
     let mut best_score = -INF;
     let mut raw_eval: Option<i32> = None;
@@ -706,7 +799,7 @@ pub(super) fn qsearch(board: &mut Board, mut alpha: i32, beta: i32, ply: u32, ct
     let mut q = ScoredMoves::empty();
     for i in 0..moves.len() {
         let m = moves.get(i);
-        if !in_check && m.is_capture() && !capture_cannot_lose(board, m) && see(board, m) < 0 {
+        if !in_check && m.is_capture() && !see_ge(board, m, 0) {
             continue;
         }
         let s = if Some(m) == tt_move { 1_000_000 } else { qscore(m, board) };

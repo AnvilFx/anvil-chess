@@ -150,6 +150,44 @@ def features(fen, layout, mirrored):
             [bb + (k if c == 1 else k + 6) * 64 + (s ^ 56 ^ bf) for c, k, s in pieces])
 
 
+def refine_order(nz, order, max_swaps=20000):
+    """Greedy neuron swaps between groups of 4, each one cutting the count of nonzero groups."""
+    import numpy as np
+    m = nz.astype(np.float32)  # accumulators x neurons
+    n, g = m.shape[1], m.shape[1] // 4
+    pos = np.array(order)  # slot -> neuron
+    ones = m.sum(0)
+    grp = np.arange(n) // 4
+
+    def others(G):  # per slot of group G: OR of the group's other three neurons
+        cols = m[:, pos[4 * G:4 * G + 4]] > 0
+        return np.stack([np.delete(cols, k, axis=1).any(1) for k in range(4)]).astype(np.float32)
+
+    def count(G):
+        return float((m[:, pos[4 * G:4 * G + 4]] > 0).any(1).sum())
+
+    o = np.concatenate([others(G) for G in range(g)])  # slots x accumulators
+    osz, cross = o.sum(1), o @ m  # cross[slot, neuron] = |others(slot) & neuron|
+    cnt = np.array([count(G) for G in range(g)])
+    same = grp[:, None] == grp[None, :]
+    swaps = 0
+    for swaps in range(max_swaps):
+        # new count of slot a's group if slot a took slot b's neuron
+        new = osz[:, None] + ones[pos][None, :] - cross[:, pos]
+        delta = new + new.T - cnt[grp][:, None] - cnt[grp][None, :]
+        delta[same] = 0
+        a, b = np.unravel_index(np.argmin(delta), delta.shape)
+        if delta[a, b] >= 0:
+            break
+        pos[a], pos[b] = pos[b], pos[a]
+        for G in (grp[a], grp[b]):
+            s = slice(4 * G, 4 * G + 4)
+            o[s] = others(G)
+            osz[s], cross[s], cnt[G] = o[s].sum(1), o[s] @ m, count(G)
+    print(f"  permute: {swaps} swaps")
+    return pos
+
+
 def permute_neurons(args, ft_w, ft_b, l1w, n, layout, mirrored):
     """Order pairwise neurons by activity; exact, since the engine sums integers either way."""
     import numpy as np
@@ -168,10 +206,15 @@ def permute_neurons(args, ft_w, ft_b, l1w, n, layout, mirrored):
             if len(masks) >= 2 * args.permute_count:
                 break
     nz = np.array(masks)
-    order = np.argsort(-nz.mean(0), kind="stable")
+    # The last fifth of the sample is held out, to check the swaps generalise.
+    cut = len(nz) * 4 // 5 // 2 * 2
+    fit, held = nz[:cut], nz[cut:]
+    order = np.argsort(-fit.mean(0), kind="stable")
     group_rate = lambda m: m.reshape(len(m), -1, 4).any(-1).mean()
-    print(f"  permute: {len(nz)} accumulators, nonzero bytes {nz.mean():.1%}, "
-          f"nonzero groups {group_rate(nz):.1%} -> {group_rate(nz[:, order]):.1%}")
+    sorted_rate = group_rate(held[:, order])
+    order = refine_order(fit, order)
+    print(f"  permute: {len(nz)} accumulators, nonzero bytes {nz.mean():.1%}, nonzero groups on held-out "
+          f"positions {group_rate(held):.1%} -> sorted {sorted_rate:.1%} -> swapped {group_rate(held[:, order]):.1%}")
     cols = np.concatenate([order, order + h])
     l1 = np.asarray(l1w, dtype=np.float64).reshape(-1, n)
     return list(w[:, cols].ravel()), list(b[cols]), list(l1[:, cols].ravel())

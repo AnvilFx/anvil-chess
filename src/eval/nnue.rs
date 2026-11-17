@@ -133,16 +133,11 @@ fn pairwise_scalar(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: &mut [u8; 
 }
 
 // mulhi(a << 7, b) is exactly (a * b) >> 9; packus interleaves 128-bit lanes, the permute undoes it.
-// Also lists the 4-byte groups with any nonzero byte into `nz` (8 slack slots for the index
-// stores) and returns their count.
+// Writes all N_HIDDEN bytes of `act`, lists the 4-byte groups with any nonzero byte into `nz`
+// (N_HIDDEN / 4 slots; the index stores never pass the end) and returns their count.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn pairwise_avx2(
-    us: &[i16; N_HIDDEN],
-    them: &[i16; N_HIDDEN],
-    act: &mut [u8; N_HIDDEN],
-    nz: &mut [u16; N_HIDDEN / 4 + 8],
-) -> usize {
+unsafe fn pairwise_avx2(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mut u8, nz: *mut u16) -> usize {
     use std::arch::x86_64::*;
     let zero = _mm256_setzero_si256();
     let max = _mm256_set1_epi16(QA as i16);
@@ -158,10 +153,48 @@ unsafe fn pairwise_avx2(
             let packed = _mm256_packus_epi16(pair(c * 32), pair(c * 32 + 16));
             let v = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
             let at = side * H + c * 32;
-            _mm256_storeu_si256(act.as_mut_ptr().add(at) as *mut __m256i, v);
+            _mm256_storeu_si256(act.add(at) as *mut __m256i, v);
             let m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(v, zero))) as usize;
             let idx = _mm_loadu_si128(MASK_INDICES[m].as_ptr() as *const __m128i);
-            _mm_storeu_si128(nz.as_mut_ptr().add(n) as *mut __m128i, _mm_add_epi16(idx, _mm_set1_epi16((at / 4) as i16)));
+            _mm_storeu_si128(nz.add(n) as *mut __m128i, _mm_add_epi16(idx, _mm_set1_epi16((at / 4) as i16)));
+            n += m.count_ones() as usize;
+        }
+    }
+    n
+}
+
+// pairwise_avx2 in 512-bit steps. `b` only needs the upper clamp: a negative b makes the product
+// <= 0 and packus saturates it to 0. The nonzero groups of 128 bytes are compressed out of an
+// index vector in one go.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vbmi2")]
+unsafe fn pairwise_avx512(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mut u8, nz: *mut u16) -> usize {
+    use std::arch::x86_64::*;
+    let zero = _mm512_setzero_si512();
+    let max = _mm512_set1_epi16(QA as i16);
+    let perm = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
+    let mut ids = _mm512_set_epi16(
+        31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
+    );
+    let step = _mm512_set1_epi16(32);
+    let mut n = 0;
+    for (side, src) in [us, them].into_iter().enumerate() {
+        let p = src.as_ptr();
+        let pair = |off: usize| {
+            let a = _mm512_min_epi16(_mm512_max_epi16(_mm512_loadu_si512(p.add(off) as *const _), zero), max);
+            let b = _mm512_min_epi16(_mm512_loadu_si512(p.add(H + off) as *const _), max);
+            _mm512_mulhi_epi16(_mm512_slli_epi16(a, 7), b)
+        };
+        for c in 0..H / 128 {
+            let o = c * 128;
+            let v0 = _mm512_permutexvar_epi64(perm, _mm512_packus_epi16(pair(o), pair(o + 32)));
+            let v1 = _mm512_permutexvar_epi64(perm, _mm512_packus_epi16(pair(o + 64), pair(o + 96)));
+            let at = side * H + o;
+            _mm512_storeu_si512(act.add(at) as *mut _, v0);
+            _mm512_storeu_si512(act.add(at + 64) as *mut _, v1);
+            let m = (_mm512_test_epi32_mask(v1, v1) as u32) << 16 | _mm512_test_epi32_mask(v0, v0) as u32;
+            _mm512_storeu_si512(nz.add(n) as *mut _, _mm512_maskz_compress_epi16(m, ids));
+            ids = _mm512_add_epi16(ids, step);
             n += m.count_ones() as usize;
         }
     }
@@ -227,11 +260,46 @@ macro_rules! l1_sparse {
     };
 }
 l1_sparse!(l1_avxvnni, "avx2,avxvnni", |a, x, w| _mm256_dpbusd_avx_epi32(a, x, w));
-l1_sparse!(l1_avx512vnni, "avx2,avx512vnni,avx512vl", |a, x, w| _mm256_dpbusd_epi32(a, x, w));
 l1_sparse!(l1_avx2, "avx2", |a, x, w| _mm256_add_epi32(
     a,
     _mm256_madd_epi16(_mm256_maddubs_epi16(x, w), _mm256_set1_epi16(1))
 ));
+
+// One zmm holds a group's 16 x 4 weights; four groups per step into separate accumulators. The
+// last 0-3 groups run as one more step with the rest masked to zero, so there is no remainder loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx512f,avx512vnni")]
+unsafe fn l1_avx512vnni(act: &[u8; N_HIDDEN], nz: *const u16, n: usize, w: &L1Weights) -> [i32; L1] {
+    use std::arch::x86_64::*;
+    let groups = act.as_ptr() as *const i32;
+    let dotg = |acc, g: usize, m: __mmask16| {
+        let x = _mm512_maskz_set1_epi32(m, groups.add(g).read_unaligned());
+        _mm512_dpbusd_epi32(acc, x, _mm512_loadu_si512(w.as_ptr().add(g) as *const __m512i))
+    };
+    let z = _mm512_setzero_si512();
+    let (mut a, mut b, mut c, mut d) = (z, z, z, z);
+    let mut i = 0;
+    // Four indices per load; each is below 256, so its low byte is the whole index.
+    let quad = |i: usize| (nz.add(i) as *const u64).read_unaligned();
+    while i + 4 <= n {
+        let q = quad(i);
+        a = dotg(a, q as u8 as usize, !0);
+        b = dotg(b, (q >> 16) as u8 as usize, !0);
+        c = dotg(c, (q >> 32) as u8 as usize, !0);
+        d = dotg(d, (q >> 48) as u8 as usize, !0);
+        i += 4;
+    }
+    let r = n - i;
+    let m = |j: usize| ((j < r) as u16).wrapping_neg();
+    let q = quad(i);
+    a = dotg(a, q as u8 as usize, m(0));
+    b = dotg(b, (q >> 16) as u8 as usize, m(1));
+    c = dotg(c, (q >> 32) as u8 as usize, m(2));
+    let mut out = [0i32; L1];
+    let sum = _mm512_add_epi32(_mm512_add_epi32(a, b), _mm512_add_epi32(c, d));
+    _mm512_storeu_si512(out.as_mut_ptr() as *mut __m512i, sum);
+    out
+}
 
 fn l1_scalar(act: &[u8; N_HIDDEN], w: &L1Weights) -> [i32; L1] {
     let mut out = [0i32; L1];
@@ -248,38 +316,53 @@ fn l1_scalar(act: &[u8; N_HIDDEN], w: &L1Weights) -> [i32; L1] {
 // Pairwise CReLU of each side's accumulator halves -> L1 -> SCReLU -> L2 -> SCReLU -> output.
 fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i32 {
     let d = &WEIGHTS.dense[0];
-    let mut act = [0u8; N_HIDDEN];
     let l1w = &d.l1w[bucket];
     let s: [i32; L1];
     #[cfg(target_arch = "x86_64")]
     {
         if std::is_x86_feature_detected!("avx2") {
             unsafe {
-                let mut nz = [0u16; N_HIDDEN / 4 + 8];
-                let n = pairwise_avx2(us, them, &mut act, &mut nz);
-                let nz = &nz[..n];
-                s = if std::is_x86_feature_detected!("avxvnni") {
-                    l1_avxvnni(&act, nz, l1w)
-                } else if std::is_x86_feature_detected!("avx512vnni") && std::is_x86_feature_detected!("avx512vl") {
-                    l1_avx512vnni(&act, nz, l1w)
+                use std::mem::MaybeUninit;
+                #[repr(align(64))]
+                struct Act([u8; N_HIDDEN]);
+                let mut act = MaybeUninit::<Act>::uninit();
+                let mut nz = MaybeUninit::<[u16; N_HIDDEN / 4 + 8]>::uninit();
+                let (ap, np) = (act.as_mut_ptr() as *mut u8, nz.as_mut_ptr() as *mut u16);
+                let n = if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vbmi2") {
+                    pairwise_avx512(us, them, ap, np)
                 } else {
-                    l1_avx2(&act, nz, l1w)
+                    pairwise_avx2(us, them, ap, np)
+                };
+                // The zmm L1 reads up to 4 slots past the list; keep them initialised.
+                (np.add(n) as *mut u64).write_unaligned(0);
+                let act = &act.assume_init_ref().0;
+                s = if std::is_x86_feature_detected!("avx512vnni") && std::is_x86_feature_detected!("avx512f") {
+                    l1_avx512vnni(act, np, n, l1w)
+                } else {
+                    let nz = std::slice::from_raw_parts(np as *const u16, n);
+                    if std::is_x86_feature_detected!("avxvnni") {
+                        l1_avxvnni(act, nz, l1w)
+                    } else {
+                        l1_avx2(act, nz, l1w)
+                    }
                 };
             }
         } else {
+            let mut act = [0u8; N_HIDDEN];
             pairwise_scalar(us, them, &mut act);
             s = l1_scalar(&act, l1w);
         }
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
+        let mut act = [0u8; N_HIDDEN];
         pairwise_scalar(us, them, &mut act);
         s = l1_scalar(&act, l1w);
     }
 
     #[cfg(target_arch = "x86_64")]
     if std::is_x86_feature_detected!("fma") {
-        return unsafe { tail_fma(&s, bucket) };
+        return (unsafe { tail_fma(&s, bucket) } * OUT_SCALE as f32).round() as i32;
     }
     let mut h2 = d.l2b[bucket];
     for j in 0..L1 {
@@ -300,21 +383,28 @@ fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i3
 // The f32 tail in 4 vectors of 8: L2 as broadcast-FMA rows, L3 as one dot and a horizontal sum.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn tail_fma(s: &[i32; L1], bucket: usize) -> i32 {
+unsafe fn tail_fma(s: &[i32; L1], bucket: usize) -> f32 {
     use std::arch::x86_64::*;
     let d = &WEIGHTS.dense[0];
     let (zero, one) = (_mm256_setzero_ps(), _mm256_set1_ps(1.0));
     let x = |v| _mm256_min_ps(_mm256_max_ps(v, zero), one);
     let mut h = [0f32; L1];
+    let mut nonzero = 0;
     for half in 0..2 {
         let o = half * 8;
         let v = _mm256_cvtepi32_ps(_mm256_loadu_si256(s.as_ptr().add(o) as *const __m256i));
         let v = x(_mm256_fmadd_ps(v, _mm256_loadu_ps(d.l1_dequant[bucket].as_ptr().add(o)), _mm256_loadu_ps(d.l1b[bucket].as_ptr().add(o))));
-        _mm256_storeu_ps(h.as_mut_ptr().add(o), _mm256_mul_ps(v, v));
+        let v = _mm256_mul_ps(v, v);
+        _mm256_storeu_ps(h.as_mut_ptr().add(o), v);
+        nonzero |= (_mm256_movemask_ps(_mm256_cmp_ps::<_CMP_NEQ_OQ>(v, zero)) as u32) << o;
     }
     let b = d.l2b[bucket].as_ptr();
     let mut acc = [_mm256_loadu_ps(b), _mm256_loadu_ps(b.add(8)), _mm256_loadu_ps(b.add(16)), _mm256_loadu_ps(b.add(24))];
-    for j in 0..L1 {
+    // Most h are 0 and adding 0 * w leaves acc as is (up to the sign of a zero, which the clamp
+    // below erases), so only the nonzero rows are applied, still in order.
+    while nonzero != 0 {
+        let j = nonzero.trailing_zeros() as usize;
+        nonzero &= nonzero - 1;
         let hj = _mm256_set1_ps(h[j]);
         let w = d.l2w[bucket][j].as_ptr();
         for (k, a) in acc.iter_mut().enumerate() {
@@ -330,7 +420,7 @@ unsafe fn tail_fma(s: &[i32; L1], bucket: usize) -> i32 {
     let q = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
     let q = _mm_add_ps(q, _mm_movehl_ps(q, q));
     let q = _mm_add_ss(q, _mm_shuffle_ps(q, q, 1));
-    ((d.l3b[bucket] + _mm_cvtss_f32(q)) * OUT_SCALE as f32).round() as i32
+    d.l3b[bucket] + _mm_cvtss_f32(q)
 }
 
 // Where one side's features live: its king bucket's 768 rows, and a file flip
@@ -386,7 +476,7 @@ fn refresh(board: &Board, view: KingView, white_view: bool) -> [i16; N_HIDDEN] {
                 let sq = bb.trailing_zeros() as usize;
                 bb &= bb - 1;
                 let (feat_w, feat_b) = feature_indices(color, kind, sq, view, view);
-                let row = &WEIGHTS.ft_weights[if white_view { feat_w } else { feat_b }];
+                let row = &WEIGHTS.ft_weights[if white_view { feat_w } else { feat_b }].w;
                 for h in 0..N_HIDDEN {
                     acc[h] = acc[h].wrapping_add(row[h]);
                 }
@@ -399,116 +489,107 @@ fn refresh(board: &Board, view: KingView, white_view: bool) -> [i16; N_HIDDEN] {
 // The last accumulator built for one king view and the pieces it was built from, so a
 // refresh only applies what changed since ("Finny table").
 #[derive(Clone)]
+#[repr(C, align(64))]
 struct CacheEntry {
     acc: [i16; N_HIDDEN],
     pieces: [[u64; 6]; 2],
 }
 
-fn refresh_cached(entry: &mut CacheEntry, board: &Board, view: KingView, white_view: bool) -> [i16; N_HIDDEN] {
+fn refresh_cached(entry: &mut CacheEntry, board: &Board, view: KingView, white_view: bool, out: &mut [i16; N_HIDDEN]) {
+    let (mut adds, mut subs) = ([0usize; 32], [0usize; 32]);
+    let (mut na, mut ns) = (0, 0);
     for color_idx in 0..2 {
         let color = if color_idx == 0 { Color::White } else { Color::Black };
         for kind_idx in 0..6 {
             let kind = PieceKind::from_idx(kind_idx);
             let now = board.piece_bb[color_idx][kind_idx];
             let old = entry.pieces[color_idx][kind_idx];
-            let row = |sq: usize| {
-                let (feat_w, feat_b) = feature_indices(color, kind, sq, view, view);
-                &WEIGHTS.ft_weights[if white_view { feat_w } else { feat_b }]
+            let feat = |sq: u32| {
+                let (feat_w, feat_b) = feature_indices(color, kind, sq as usize, view, view);
+                if white_view { feat_w } else { feat_b }
             };
             let mut added = now & !old;
             while added != 0 {
-                let r = row(added.trailing_zeros() as usize);
+                adds[na] = feat(added.trailing_zeros());
+                na += 1;
                 added &= added - 1;
-                for (a, &w) in entry.acc.iter_mut().zip(r) {
-                    *a = a.wrapping_add(w);
-                }
             }
             let mut removed = old & !now;
             while removed != 0 {
-                let r = row(removed.trailing_zeros() as usize);
+                subs[ns] = feat(removed.trailing_zeros());
+                ns += 1;
                 removed &= removed - 1;
-                for (a, &w) in entry.acc.iter_mut().zip(r) {
-                    *a = a.wrapping_sub(w);
-                }
             }
             entry.pieces[color_idx][kind_idx] = now;
         }
     }
-    entry.acc
+    let acc = entry.acc.as_mut_ptr();
+    unsafe { apply_rows(acc, &adds[..na], &subs[..ns], acc, out.as_mut_ptr()) };
 }
 
-// Real positions never overflow i16; wrapping ops just avoid debug-mode panics.
-#[inline]
-fn transition_add_sub(
-    src_w: &[i16; N_HIDDEN],
-    src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN],
-    dst_b: &mut [i16; N_HIDDEN],
-    add: (usize, usize),
-    sub: (usize, usize),
-) {
+// dst = src + the `adds` rows - the `subs` rows, one tile at a time; a non-null dst2 gets a copy.
+// src may be dst.
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx512bw")))]
+#[inline(always)]
+unsafe fn apply_rows(src: *const i16, adds: &[usize], subs: &[usize], dst: *mut i16, dst2: *mut i16) {
+    const T: usize = 64;
     let ft = &WEIGHTS.ft_weights;
-    let aw = &ft[add.0];
-    let ab = &ft[add.1];
-    let sw = &ft[sub.0];
-    let sb = &ft[sub.1];
-    for h in 0..N_HIDDEN {
-        dst_w[h] = src_w[h].wrapping_add(aw[h]).wrapping_sub(sw[h]);
-        dst_b[h] = src_b[h].wrapping_add(ab[h]).wrapping_sub(sb[h]);
+    for c in (0..N_HIDDEN).step_by(T) {
+        let mut t = [0i16; T];
+        t.copy_from_slice(std::slice::from_raw_parts(src.add(c), T));
+        for &f in adds {
+            for (a, &w) in t.iter_mut().zip(&ft[f].w[c..c + T]) {
+                *a = a.wrapping_add(w);
+            }
+        }
+        for &f in subs {
+            for (a, &w) in t.iter_mut().zip(&ft[f].w[c..c + T]) {
+                *a = a.wrapping_sub(w);
+            }
+        }
+        std::ptr::copy_nonoverlapping(t.as_ptr(), dst.add(c), T);
+        if !dst2.is_null() {
+            std::ptr::copy_nonoverlapping(t.as_ptr(), dst2.add(c), T);
+        }
     }
 }
 
-#[inline]
-fn transition_add_sub2(
-    src_w: &[i16; N_HIDDEN],
-    src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN],
-    dst_b: &mut [i16; N_HIDDEN],
-    add: (usize, usize),
-    sub1: (usize, usize),
-    sub2: (usize, usize),
-) {
+// 512 lanes at a time stay in registers while every row is applied.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx512bw"))]
+#[inline(always)]
+unsafe fn apply_rows(src: *const i16, adds: &[usize], subs: &[usize], dst: *mut i16, dst2: *mut i16) {
+    use std::arch::x86_64::*;
+    const R: usize = 16;
     let ft = &WEIGHTS.ft_weights;
-    let aw = &ft[add.0];
-    let ab = &ft[add.1];
-    let s1w = &ft[sub1.0];
-    let s1b = &ft[sub1.1];
-    let s2w = &ft[sub2.0];
-    let s2b = &ft[sub2.1];
-    for h in 0..N_HIDDEN {
-        dst_w[h] = src_w[h].wrapping_add(aw[h]).wrapping_sub(s1w[h]).wrapping_sub(s2w[h]);
-        dst_b[h] = src_b[h].wrapping_add(ab[h]).wrapping_sub(s1b[h]).wrapping_sub(s2b[h]);
+    for c in (0..N_HIDDEN).step_by(32 * R) {
+        let mut t = [_mm512_setzero_si512(); R];
+        for (k, v) in t.iter_mut().enumerate() {
+            *v = _mm512_loadu_si512(src.add(c + 32 * k) as *const __m512i);
+        }
+        for &f in adds {
+            let w = ft[f].w.as_ptr().add(c);
+            for (k, v) in t.iter_mut().enumerate() {
+                *v = _mm512_add_epi16(*v, _mm512_loadu_si512(w.add(32 * k) as *const __m512i));
+            }
+        }
+        for &f in subs {
+            let w = ft[f].w.as_ptr().add(c);
+            for (k, v) in t.iter_mut().enumerate() {
+                *v = _mm512_sub_epi16(*v, _mm512_loadu_si512(w.add(32 * k) as *const __m512i));
+            }
+        }
+        for (k, v) in t.iter().enumerate() {
+            _mm512_storeu_si512(dst.add(c + 32 * k) as *mut __m512i, *v);
+            if !dst2.is_null() {
+                _mm512_storeu_si512(dst2.add(c + 32 * k) as *mut __m512i, *v);
+            }
+        }
     }
 }
 
-#[inline]
-#[allow(clippy::too_many_arguments)]
-fn transition_add2_sub2(
-    src_w: &[i16; N_HIDDEN],
-    src_b: &[i16; N_HIDDEN],
-    dst_w: &mut [i16; N_HIDDEN],
-    dst_b: &mut [i16; N_HIDDEN],
-    add1: (usize, usize),
-    add2: (usize, usize),
-    sub1: (usize, usize),
-    sub2: (usize, usize),
-) {
-    let ft = &WEIGHTS.ft_weights;
-    let a1w = &ft[add1.0];
-    let a1b = &ft[add1.1];
-    let a2w = &ft[add2.0];
-    let a2b = &ft[add2.1];
-    let s1w = &ft[sub1.0];
-    let s1b = &ft[sub1.1];
-    let s2w = &ft[sub2.0];
-    let s2b = &ft[sub2.1];
-    for h in 0..N_HIDDEN {
-        dst_w[h] = src_w[h].wrapping_add(a1w[h]).wrapping_add(a2w[h]).wrapping_sub(s1w[h]).wrapping_sub(s2w[h]);
-        dst_b[h] = src_b[h].wrapping_add(a1b[h]).wrapping_add(a2b[h]).wrapping_sub(s1b[h]).wrapping_sub(s2b[h]);
-    }
-}
-
-#[derive(Clone)]
+// Cache-line aligned so the 512-bit update loops never split a line.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
 pub struct Accumulator {
     pub white: [i16; N_HIDDEN],
     pub black: [i16; N_HIDDEN],
@@ -546,7 +627,7 @@ impl Accumulator {
 pub const MAX_ACC_PLY: usize = 256;
 
 pub struct AccStack {
-    stack: Box<[Accumulator]>,
+    stack: crate::mem::HugeBuf<Accumulator>,
     ply: usize,
     // Refresh cache per side (white, black), indexed by KingView::slot.
     cache: [Vec<CacheEntry>; 2],
@@ -560,11 +641,13 @@ impl Default for AccStack {
 
 impl AccStack {
     pub fn new() -> Self {
-        let v: Vec<Accumulator> = (0..MAX_ACC_PLY).map(|_| Accumulator::empty()).collect();
+        // All-zero bytes are a valid Accumulator.
+        let mut stack = unsafe { crate::mem::HugeBuf::<Accumulator>::zeroed(MAX_ACC_PLY) };
+        stack.fill(Accumulator::empty());
         let empty = CacheEntry { acc: WEIGHTS.ft_bias, pieces: [[0; 6]; 2] };
         let slots = WEIGHTS.ft_weights.len() / 768 * 2;
         let cache = [vec![empty.clone(); slots], vec![empty; slots]];
-        Self { stack: v.into_boxed_slice(), ply: 0, cache }
+        Self { stack, ply: 0, cache }
     }
 
     pub fn init(&mut self, board: &Board) {
@@ -594,7 +677,8 @@ impl AccStack {
         let sub_mover = feature_indices(stm, original_kind, from.0 as usize, wv, bv);
         let add_mover = feature_indices(stm, arrived.kind, to.0 as usize, wv, bv);
 
-        if flag == Move::CASTLE_KING || flag == Move::CASTLE_QUEEN {
+        let none = (0, 0);
+        let (adds, subs, shape) = if flag == Move::CASTLE_KING || flag == Move::CASTLE_QUEEN {
             let king_side = flag == Move::CASTLE_KING;
             let (rf, rt) = match (king_side, stm) {
                 (true, Color::White) => (Square(7), Square(5)),
@@ -604,16 +688,7 @@ impl AccStack {
             };
             let sub_rook = feature_indices(stm, PieceKind::Rook, rf.0 as usize, wv, bv);
             let add_rook = feature_indices(stm, PieceKind::Rook, rt.0 as usize, wv, bv);
-            transition_add2_sub2(
-                &src.white,
-                &src.black,
-                &mut dst.white,
-                &mut dst.black,
-                add_mover,
-                add_rook,
-                sub_mover,
-                sub_rook,
-            );
+            ([add_mover, add_rook], [sub_mover, sub_rook], 2)
         } else if let Some(cap) = undo.captured {
             let cap_sq = if flag == Move::EP_CAPTURE {
                 match stm {
@@ -624,18 +699,36 @@ impl AccStack {
                 to
             };
             let sub_cap = feature_indices(cap.color, cap.kind, cap_sq.0 as usize, wv, bv);
-            transition_add_sub2(&src.white, &src.black, &mut dst.white, &mut dst.black, add_mover, sub_mover, sub_cap);
+            ([add_mover, none], [sub_mover, sub_cap], 1)
         } else {
-            transition_add_sub(&src.white, &src.black, &mut dst.white, &mut dst.black, add_mover, sub_mover);
-        }
+            ([add_mover, none], [sub_mover, none], 0)
+        };
+
+        // Real positions never overflow i16; wrapping ops just avoid debug-mode panics.
+        let update = |src: &[i16; N_HIDDEN], dst: &mut [i16; N_HIDDEN], white: bool| {
+            let pick = |f: (usize, usize)| if white { f.0 } else { f.1 };
+            let (a, s) = (adds.map(pick), subs.map(pick));
+            let (src, dst, null) = (src.as_ptr(), dst.as_mut_ptr(), std::ptr::null_mut());
+            unsafe {
+                match shape {
+                    0 => apply_rows(src, &a[..1], &s[..1], dst, null),
+                    1 => apply_rows(src, &a[..1], &s, dst, null),
+                    _ => apply_rows(src, &a, &s, dst, null),
+                }
+            }
+        };
 
         // A king that changed bucket or crossed the mirror line invalidates its side's
-        // incremental update (made with the new view), so that side is rebuilt.
-        if wv != src.wv {
-            dst.white = refresh_cached(&mut self.cache[0][wv.slot()], board_after, wv, true);
+        // incremental update, so that side is rebuilt instead.
+        if wv == src.wv {
+            update(&src.white, &mut dst.white, true);
+        } else {
+            refresh_cached(&mut self.cache[0][wv.slot()], board_after, wv, true, &mut dst.white);
         }
-        if bv != src.bv {
-            dst.black = refresh_cached(&mut self.cache[1][bv.slot()], board_after, bv, false);
+        if bv == src.bv {
+            update(&src.black, &mut dst.black, false);
+        } else {
+            refresh_cached(&mut self.cache[1][bv.slot()], board_after, bv, false, &mut dst.black);
         }
         dst.wv = wv;
         dst.bv = bv;
@@ -686,19 +779,81 @@ mod tests {
                     continue;
                 }
                 let mut got = [0u8; N_HIDDEN];
-                let mut nz = [0u16; N_HIDDEN / 4 + 8];
-                let n = pairwise_avx2(&us, &them, &mut got, &mut nz);
+                let mut nz = [0u16; N_HIDDEN / 4];
+                let n = pairwise_avx2(&us, &them, got.as_mut_ptr(), nz.as_mut_ptr());
                 assert_eq!(got, want);
                 let nz_want: Vec<u16> = (0..N_HIDDEN / 4).filter(|&g| want[g * 4..g * 4 + 4] != [0; 4]).map(|g| g as u16).collect();
                 assert_eq!(&nz[..n], &nz_want[..]);
+                if has!("avx512bw") && has!("avx512vbmi2") {
+                    let (mut got, mut nz) = ([0u8; N_HIDDEN], [0u16; N_HIDDEN / 4]);
+                    let n = pairwise_avx512(&us, &them, got.as_mut_ptr(), nz.as_mut_ptr());
+                    assert_eq!(got, want);
+                    assert_eq!(&nz[..n], &nz_want[..]);
+                }
+                if has!("avx512vnni") && has!("avx512f") {
+                    let mut nz8 = [0u16; N_HIDDEN / 4 + 8];
+                    nz8[..n].copy_from_slice(&nz[..n]);
+                    assert_eq!(l1_avx512vnni(&want, nz8.as_ptr(), n, &w), l1_want);
+                    // Junk past the list must not leak into the masked last step.
+                    nz8[n..].fill(0xFFFF);
+                    assert_eq!(l1_avx512vnni(&want, nz8.as_ptr(), n, &w), l1_want);
+                }
                 let nz = &nz[..n];
                 assert_eq!(l1_avx2(&want, nz, &w), l1_want);
                 if has!("avxvnni") {
                     assert_eq!(l1_avxvnni(&want, nz, &w), l1_want);
                 }
-                if has!("avx512vnni") && has!("avx512vl") {
-                    assert_eq!(l1_avx512vnni(&want, nz, &w), l1_want);
+            }
+        }
+    }
+
+    // tail_fma (which skips rows of zero activations) against every fused op done in order.
+    #[test]
+    fn tail_fma_matches_fused_scalar() {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if !std::is_x86_feature_detected!("fma") {
+                return;
+            }
+            let d = &WEIGHTS.dense[0];
+            let reference = |s: &[i32; L1], b: usize| {
+                let h: [f32; L1] =
+                    std::array::from_fn(|j| (s[j] as f32).mul_add(d.l1_dequant[b][j], d.l1b[b][j]).clamp(0.0, 1.0).powi(2));
+                let mut h2 = d.l2b[b];
+                for (&hj, row) in h.iter().zip(&d.l2w[b]) {
+                    for (o, &w) in h2.iter_mut().zip(row) {
+                        *o = hj.mul_add(w, *o);
+                    }
                 }
+                let mut lane = [0f32; 8];
+                for k in 0..L2 / 8 {
+                    for (l, v) in lane.iter_mut().enumerate() {
+                        *v = h2[8 * k + l].clamp(0.0, 1.0).powi(2).mul_add(d.l3w[b][8 * k + l], *v);
+                    }
+                }
+                let q: [f32; 4] = std::array::from_fn(|i| lane[i] + lane[i + 4]);
+                let q = (q[0] + q[2]) + (q[1] + q[3]);
+                d.l3b[b] + q
+            };
+            let mut board = Board::from_fen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1").unwrap();
+            for ply in 0..300 {
+                let mut list = MoveList::new();
+                board.gen_legal_into(&mut list);
+                if list.is_empty() {
+                    break;
+                }
+                let acc = Accumulator::recompute(&board);
+                let bucket = output_bucket(board.occupancy);
+                for (us, them) in [(&acc.white, &acc.black), (&acc.black, &acc.white)] {
+                    let mut act = [0u8; N_HIDDEN];
+                    pairwise_scalar(us, them, &mut act);
+                    let s = l1_scalar(&act, &d.l1w[bucket]);
+                    for shift in [0, 1, -1, 7, -7] {
+                        let s = s.map(|v| v + shift * (v >> 4));
+                        assert_eq!(unsafe { tail_fma(&s, bucket) }.to_bits(), reference(&s, bucket).to_bits(), "ply {ply}");
+                    }
+                }
+                board.make_move(list.get((ply * 7 + 3) % list.len()));
             }
         }
     }

@@ -8,10 +8,22 @@ struct CheckInfo {
     checkers: u64,
     /// Squares non-king moves must land on: all if not in check, none if double check.
     check_mask: u64,
-    /// `!0` if not pinned, otherwise the line through king and pinner.
-    pin_ray: [u64; 64],
+    /// Own pieces pinned to the king.
+    pinned: u64,
     /// Enemy attacks with our king removed, so it can't retreat along a checking ray.
     danger: u64,
+}
+
+impl CheckInfo {
+    /// Where the piece on `sq` may go without leaving the king's line: everywhere if it isn't pinned.
+    #[inline(always)]
+    fn pin_mask(&self, sq: Square) -> u64 {
+        if self.pinned & sq.bb() != 0 {
+            LINE_BB[self.king_sq.idx()][sq.idx()]
+        } else {
+            !0u64
+        }
+    }
 }
 
 impl Board {
@@ -49,25 +61,23 @@ impl Board {
         let opp_bb = self.color_bb[stm.opp().idx()];
 
         self.gen_pawn_noisy(&info, stm, list);
-        let mut knights = self.piece_bb[stm.idx()][PieceKind::Knight.idx()];
+        let mut knights = self.piece_bb[stm.idx()][PieceKind::Knight.idx()] & !info.pinned;
         while let Some(from) = pop_lsb(&mut knights) {
-            if info.pin_ray[from.idx()] == !0u64 {
-                emit_captures(from, KNIGHT_ATTACKS[from.idx()] & opp_bb, list);
-            }
+            emit_captures(from, KNIGHT_ATTACKS[from.idx()] & opp_bb, list);
         }
         let mut bishops = self.piece_bb[stm.idx()][PieceKind::Bishop.idx()];
         while let Some(from) = pop_lsb(&mut bishops) {
-            let targets = bishop_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            let targets = bishop_attacks(from, self.occupancy) & opp_bb & info.pin_mask(from);
             emit_captures(from, targets, list);
         }
         let mut rooks = self.piece_bb[stm.idx()][PieceKind::Rook.idx()];
         while let Some(from) = pop_lsb(&mut rooks) {
-            let targets = rook_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            let targets = rook_attacks(from, self.occupancy) & opp_bb & info.pin_mask(from);
             emit_captures(from, targets, list);
         }
         let mut queens = self.piece_bb[stm.idx()][PieceKind::Queen.idx()];
         while let Some(from) = pop_lsb(&mut queens) {
-            let targets = queen_attacks(from, self.occupancy) & opp_bb & info.pin_ray[from.idx()];
+            let targets = queen_attacks(from, self.occupancy) & opp_bb & info.pin_mask(from);
             emit_captures(from, targets, list);
         }
         // King captures, checked one target at a time instead of building the danger map.
@@ -151,7 +161,7 @@ impl Board {
             danger |= KING_ATTACKS[lsb(opp_king_bb).idx()];
         }
 
-        let checkers = self.attackers_of_square(king_sq, opp);
+        let checkers = self.checkers;
 
         let check_mask = match checkers.count_ones() {
             0 => !0u64,
@@ -169,42 +179,36 @@ impl Board {
             _ => 0u64,
         };
 
-        CheckInfo { king_sq, checkers, check_mask, pin_ray: self.pin_rays(stm, king_sq), danger }
+        CheckInfo { king_sq, checkers, check_mask, pinned: self.pinned(stm, king_sq), danger }
     }
 
     /// Check info for a side known not to be in check, without the king danger map.
     fn compute_pin_info(&self, stm: Color) -> CheckInfo {
         let king_sq = lsb(self.piece_bb[stm.idx()][PieceKind::King.idx()]);
-        CheckInfo { king_sq, checkers: 0, check_mask: !0u64, pin_ray: self.pin_rays(stm, king_sq), danger: 0 }
+        CheckInfo { king_sq, checkers: 0, check_mask: !0u64, pinned: self.pinned(stm, king_sq), danger: 0 }
     }
 
-    fn pin_rays(&self, stm: Color, king_sq: Square) -> [u64; 64] {
+    fn pinned(&self, stm: Color, king_sq: Square) -> u64 {
         let opp_idx = stm.opp().idx();
         let own_bb = self.color_bb[stm.idx()];
-        let mut pin_ray = [!0u64; 64];
+        let mut pinned = 0u64;
         let bishop_q = self.piece_bb[opp_idx][PieceKind::Bishop.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
         let rook_q = self.piece_bb[opp_idx][PieceKind::Rook.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
         let mut snipers = (bishop_q & bishop_attacks(king_sq, 0)) | (rook_q & rook_attacks(king_sq, 0));
         while let Some(sniper_sq) = pop_lsb(&mut snipers) {
             let between = BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] & self.occupancy;
             if between.count_ones() == 1 {
-                let pinned_sq = lsb(between);
-                if pinned_sq.bb() & own_bb != 0 {
-                    pin_ray[pinned_sq.idx()] = BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] | sniper_sq.bb();
-                }
+                pinned |= between & own_bb;
             }
         }
-        pin_ray
+        pinned
     }
 
     fn gen_knight_legal(&self, info: &CheckInfo, stm: Color, out: &mut MoveList) {
-        let mut knights = self.piece_bb[stm.idx()][PieceKind::Knight.idx()];
+        let mut knights = self.piece_bb[stm.idx()][PieceKind::Knight.idx()] & !info.pinned;
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut knights) {
-            if info.pin_ray[from.idx()] != !0u64 {
-                continue;
-            }
             let targets = KNIGHT_ATTACKS[from.idx()] & !own & info.check_mask;
             emit_targets(from, targets, opp_bb, out);
         }
@@ -215,7 +219,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut bishops) {
-            let targets = bishop_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
+            let targets = bishop_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_mask(from);
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -225,7 +229,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut rooks) {
-            let targets = rook_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
+            let targets = rook_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_mask(from);
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -235,7 +239,7 @@ impl Board {
         let own = self.color_bb[stm.idx()];
         let opp_bb = self.color_bb[stm.opp().idx()];
         while let Some(from) = pop_lsb(&mut queens) {
-            let targets = queen_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_ray[from.idx()];
+            let targets = queen_attacks(from, self.occupancy) & !own & info.check_mask & info.pin_mask(from);
             emit_targets(from, targets, opp_bb, out);
         }
     }
@@ -299,7 +303,7 @@ impl Board {
 
         let mut p = pawns;
         while let Some(from) = pop_lsb(&mut p) {
-            let pin = info.pin_ray[from.idx()];
+            let pin = info.pin_mask(from);
 
             let to_idx = from.0 as i8 + step;
             if (0..64).contains(&to_idx) {
@@ -363,7 +367,7 @@ impl Board {
 
         let mut p = pawns;
         while let Some(from) = pop_lsb(&mut p) {
-            let pin = info.pin_ray[from.idx()];
+            let pin = info.pin_mask(from);
             let to_idx = from.0 as i8 + step;
             if (0..64).contains(&to_idx) {
                 let to = Square(to_idx as u8);

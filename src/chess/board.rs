@@ -14,14 +14,20 @@ const fn mb_encode_ck(color: Color, kind: PieceKind) -> u8 {
     1 + kind as u8 + (color as u8) * 6
 }
 
-fn mb_decode(code: u8) -> Option<Piece> {
-    if code == MB_EMPTY {
-        return None;
+const MB_DECODE: [Option<Piece>; 16] = {
+    let mut t = [None; 16];
+    let mut i = 0;
+    while i < 12 {
+        let color = if i < 6 { Color::White } else { Color::Black };
+        t[i + 1] = Some(Piece { color, kind: PieceKind::from_idx(i % 6) });
+        i += 1;
     }
-    let idx = (code - 1) as usize;
-    let color = if idx < 6 { Color::White } else { Color::Black };
-    let kind = PieceKind::from_idx(idx % 6);
-    Some(Piece { color, kind })
+    t
+};
+
+#[inline]
+fn mb_decode(code: u8) -> Option<Piece> {
+    MB_DECODE[(code & 15) as usize]
 }
 
 #[derive(Clone)]
@@ -36,6 +42,8 @@ pub struct Board {
     pub halfmove_clock: u16,
     pub fullmove_number: u16,
     pub hash: u64,
+    /// Enemy pieces giving check to the side to move.
+    pub checkers: u64,
 }
 
 impl Default for Board {
@@ -51,6 +59,7 @@ pub struct UndoInfo {
     pub en_passant: Option<Square>,
     pub halfmove_clock: u16,
     pub hash: u64,
+    pub checkers: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -73,6 +82,7 @@ impl Board {
             halfmove_clock: 0,
             fullmove_number: 1,
             hash: 0,
+            checkers: 0,
         }
     }
 
@@ -250,6 +260,7 @@ impl Board {
         }
 
         board.hash ^= zob_meta(board.side_to_move, board.castle, board.en_passant);
+        board.checkers = board.compute_checkers();
 
         Ok(board)
     }
@@ -344,6 +355,9 @@ impl Board {
     }
 
     pub fn in_check(&self, side: Color) -> bool {
+        if side == self.side_to_move {
+            return self.checkers != 0;
+        }
         let king_bb = self.piece_bb[side.idx()][PieceKind::King.idx()];
         if king_bb == 0 {
             return false;
@@ -352,7 +366,18 @@ impl Board {
         self.is_square_attacked(king_sq, side.opp())
     }
 
+    #[inline]
+    fn compute_checkers(&self) -> u64 {
+        let stm = self.side_to_move;
+        let king_bb = self.piece_bb[stm.idx()][PieceKind::King.idx()];
+        if king_bb == 0 {
+            return 0;
+        }
+        self.attackers_of_square(lsb(king_bb), stm.opp())
+    }
+
     /// `m` must be at least pseudo-legal.
+    #[inline(always)]
     pub fn make_move(&mut self, m: Move) -> UndoInfo {
         let from = m.from();
         let to = m.to();
@@ -378,6 +403,7 @@ impl Board {
             en_passant: self.en_passant,
             halfmove_clock: self.halfmove_clock,
             hash: self.hash,
+            checkers: self.checkers,
         };
 
         // Remove the old meta hash bits; the new ones are added at the end.
@@ -466,10 +492,12 @@ impl Board {
         self.side_to_move = stm.opp();
 
         self.hash ^= zob_meta(self.side_to_move, self.castle, self.en_passant);
+        self.checkers = self.compute_checkers();
 
         undo
     }
 
+    #[inline(always)]
     pub fn unmake_move(&mut self, m: Move, undo: UndoInfo) {
         let from = m.from();
         let to = m.to();
@@ -521,6 +549,7 @@ impl Board {
         }
 
         self.hash = undo.hash;
+        self.checkers = undo.checkers;
     }
 
     /// The side to move must not be in check.
@@ -531,6 +560,7 @@ impl Board {
         self.halfmove_clock = self.halfmove_clock.saturating_add(1);
         self.side_to_move = self.side_to_move.opp();
         self.hash ^= zob_meta(self.side_to_move, self.castle, self.en_passant);
+        debug_assert_eq!(self.checkers, 0);
         undo
     }
 
