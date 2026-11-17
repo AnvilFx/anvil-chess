@@ -5,4 +5,6 @@
 # For a portable binary you can distribute to other machines, replace "native"
 # with "x86-64-v3" (AVX2 baseline, runs on Haswell+) or remove this file.
 [build]
-rustflags = ["-C", "target-cpu=native"]
+# --cfg pext: PEXT slider attacks, fast on Intel and Zen 3+ but very slow on Zen 1/2, so the
+# portable release builds (which set RUSTFLAGS) use magic bitboards instead.
+rustflags = ["-C", "target-cpu=native", "--cfg", "pext"]

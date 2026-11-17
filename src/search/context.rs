@@ -29,6 +29,8 @@ pub(super) struct SearchCtx {
     pub(super) evals: [Option<i32>; MAX_PLY],
     /// Raw eval of a child the parent already evaluated for LMR, keyed by hash, so the child skips it.
     pub(super) child_eval: Option<(u64, i32)>,
+    /// Whether that child is in check, keyed the same way.
+    pub(super) child_check: Option<(u64, bool)>,
     /// How far search results have strayed from the raw eval, per side to move and pawn structure.
     pub(super) corr: Box<[[i16; CORR_SIZE]; 2]>,
     /// Hashes from game start to the parent of the current node.
@@ -61,6 +63,7 @@ impl SearchCtx {
             played: [None; MAX_PLY],
             evals: [None; MAX_PLY],
             child_eval: None,
+            child_check: None,
             corr: Box::new([[0; CORR_SIZE]; 2]),
             hashes: Vec::with_capacity(MAX_PLY + 64),
             root_idx: 0,
@@ -93,6 +96,7 @@ impl SearchCtx {
         self.played = [None; MAX_PLY];
         self.evals = [None; MAX_PLY];
         self.child_eval = None;
+        self.child_check = None;
         self.accs.init(board);
         self.hashes.clear();
         self.hashes.extend_from_slice(history);
@@ -197,29 +201,11 @@ impl SearchCtx {
         let p = &self.params;
         let bonus = (p.hist_bonus_mul * d - p.hist_bonus_off).clamp(0, p.hist_bonus_max);
         let malus = (p.hist_malus_mul * d - p.hist_malus_off).clamp(0, p.hist_malus_max);
-        self.history_stat(board, ply, best, bonus);
+        let rows = HistRows::new(self, board, ply);
+        rows.add(self, board, best, bonus);
         for &q in searched {
             if q != best {
-                self.history_stat(board, ply, q, -malus);
-            }
-        }
-    }
-
-    #[inline]
-    pub(super) fn history_stat(&mut self, board: &Board, ply: usize, m: Move, delta: i32) {
-        let (tf, tt) = butterfly_slot(self.threats[ply], m);
-        let e = &mut self.history_heur[board.side_to_move.idx()][tf][tt][m.from().idx()][m.to().idx()];
-        let v = *e as i32;
-        *e = (v + delta - v * delta.abs() / HISTORY_MAX) as i16;
-        let cur = piece_key(board, m);
-        if (1..MAX_PLY).contains(&ply) {
-            if let Some(prev) = self.played[ply] {
-                self.cont.add(0, prev, cur, delta);
-            }
-        }
-        if ply >= 2 && ply - 1 < MAX_PLY {
-            if let Some(prev2) = self.played[ply - 1] {
-                self.cont.add(1, prev2, cur, delta);
+                rows.add(self, board, q, -malus);
             }
         }
     }

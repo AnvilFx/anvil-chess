@@ -1,4 +1,5 @@
 use super::types::Square;
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 use std::sync::LazyLock;
 
 /// `bb` must be non-zero.
@@ -155,6 +156,49 @@ pub(crate) static BETWEEN_BB: [[u64; 64]; 64] = {
     arr
 };
 
+const fn line_bb_calc(a: u8, b: u8) -> u64 {
+    if a == b {
+        return 0;
+    }
+    let (af, ar, bf, br) = ((a % 8) as i8, (a / 8) as i8, (b % 8) as i8, (b / 8) as i8);
+    let (df, dr) = (bf - af, br - ar);
+    let aligned = df == 0 || dr == 0 || df == dr || df == -dr;
+    if !aligned {
+        return 0;
+    }
+    let (sf, sr) = (df.signum(), dr.signum());
+    let mut bb = 1u64 << a;
+    let mut dir = 0;
+    while dir < 2 {
+        let (stf, str) = if dir == 0 { (sf, sr) } else { (-sf, -sr) };
+        let mut f = af + stf;
+        let mut r = ar + str;
+        while f >= 0 && f < 8 && r >= 0 && r < 8 {
+            bb |= 1u64 << ((r as u8) * 8 + (f as u8));
+            f += stf;
+            r += str;
+        }
+        dir += 1;
+    }
+    bb
+}
+
+/// The full board line through `a` and `b`, edge to edge; zero if not aligned.
+pub(crate) static LINE_BB: [[u64; 64]; 64] = {
+    let mut arr = [[0u64; 64]; 64];
+    let mut i = 0;
+    while i < 64 {
+        let mut j = 0;
+        while j < 64 {
+            arr[i][j] = line_bb_calc(i as u8, j as u8);
+            j += 1;
+        }
+        i += 1;
+    }
+    arr
+};
+
+#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
 fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     let mut attacks = 0u64;
     let file0 = sq.file() as i8;
@@ -176,14 +220,129 @@ fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     attacks
 }
 
+#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
 pub(crate) fn bishop_attacks_raycast(sq: Square, occ: u64) -> u64 {
     slider_attacks(sq, occ, &[(1, 1), (1, -1), (-1, 1), (-1, -1)])
 }
 
+#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
 pub(crate) fn rook_attacks_raycast(sq: Square, occ: u64) -> u64 {
     slider_attacks(sq, occ, &[(0, 1), (0, -1), (1, 0), (-1, 0)])
 }
 
+// BMI2 PEXT indexes the attack tables directly; they are built at compile time.
+#[cfg(all(target_feature = "bmi2", pext))]
+mod pext {
+    use super::Square;
+
+    const fn ray_attacks(sq: u8, occ: u64, rook: bool) -> u64 {
+        let f0 = (sq % 8) as i8;
+        let r0 = (sq / 8) as i8;
+        let dirs: [(i8, i8); 4] =
+            if rook { [(0, 1), (0, -1), (1, 0), (-1, 0)] } else { [(1, 1), (1, -1), (-1, 1), (-1, -1)] };
+        let mut attacks = 0u64;
+        let mut d = 0;
+        while d < 4 {
+            let (df, dr) = dirs[d];
+            let mut f = f0 + df;
+            let mut r = r0 + dr;
+            while f >= 0 && f < 8 && r >= 0 && r < 8 {
+                let bit = 1u64 << ((r as u8) * 8 + f as u8);
+                attacks |= bit;
+                if occ & bit != 0 {
+                    break;
+                }
+                f += df;
+                r += dr;
+            }
+            d += 1;
+        }
+        attacks
+    }
+
+    /// Relevant blockers: the empty-board rays without the board edge they run into.
+    const fn relevant_mask(sq: u8, rook: bool) -> u64 {
+        let (f, r) = (sq % 8, sq / 8);
+        let edges = if rook {
+            (if f != 0 { 0x0101_0101_0101_0101 } else { 0 })
+                | (if f != 7 { 0x8080_8080_8080_8080 } else { 0 })
+                | (if r != 0 { 0xFF } else { 0 })
+                | (if r != 7 { 0xFF00_0000_0000_0000 } else { 0 })
+        } else {
+            0xFF81_8181_8181_81FF
+        };
+        ray_attacks(sq, 0, rook) & !edges
+    }
+
+    #[derive(Clone, Copy)]
+    struct PextEntry {
+        mask: u64,
+        offset: usize,
+    }
+
+    const fn pext_entries(rook: bool) -> [PextEntry; 64] {
+        let mut e = [PextEntry { mask: 0, offset: 0 }; 64];
+        let mut off = 0;
+        let mut sq = 0;
+        while sq < 64 {
+            let mask = relevant_mask(sq as u8, rook);
+            e[sq] = PextEntry { mask, offset: off };
+            off += 1 << mask.count_ones();
+            sq += 1;
+        }
+        e
+    }
+
+    const ROOK_PEXT_SIZE: usize = 102_400;
+    const BISHOP_PEXT_SIZE: usize = 5_248;
+    static ROOK_PEXT_ENTRIES: [PextEntry; 64] = pext_entries(true);
+    static BISHOP_PEXT_ENTRIES: [PextEntry; 64] = pext_entries(false);
+
+    // Carry-Rippler walks the subsets of a mask in increasing PEXT index order.
+    const fn pext_table<const N: usize>(rook: bool) -> [u64; N] {
+        let mut t = [0u64; N];
+        let mut sq = 0;
+        let mut off = 0;
+        while sq < 64 {
+            let mask = relevant_mask(sq as u8, rook);
+            let mut sub = 0u64;
+            loop {
+                t[off] = ray_attacks(sq as u8, sub, rook);
+                off += 1;
+                sub = sub.wrapping_sub(mask) & mask;
+                if sub == 0 {
+                    break;
+                }
+            }
+            sq += 1;
+        }
+        t
+    }
+
+    static ROOK_PEXT: [u64; ROOK_PEXT_SIZE] = pext_table(true);
+    static BISHOP_PEXT: [u64; BISHOP_PEXT_SIZE] = pext_table(false);
+
+    #[inline(always)]
+    pub fn bishop_attacks(sq: Square, occ: u64) -> u64 {
+        unsafe {
+            let e = BISHOP_PEXT_ENTRIES.get_unchecked(sq.idx());
+            *BISHOP_PEXT.get_unchecked(e.offset + std::arch::x86_64::_pext_u64(occ, e.mask) as usize)
+        }
+    }
+
+    #[inline(always)]
+    pub fn rook_attacks(sq: Square, occ: u64) -> u64 {
+        unsafe {
+            let e = ROOK_PEXT_ENTRIES.get_unchecked(sq.idx());
+            *ROOK_PEXT.get_unchecked(e.offset + std::arch::x86_64::_pext_u64(occ, e.mask) as usize)
+        }
+    }
+}
+
+#[cfg(all(target_feature = "bmi2", pext))]
+pub use pext::{bishop_attacks, rook_attacks};
+
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 #[inline(always)]
 pub fn bishop_attacks(sq: Square, occ: u64) -> u64 {
     let mi = &*BISHOP_MAGIC;
@@ -196,6 +355,7 @@ pub fn bishop_attacks(sq: Square, occ: u64) -> u64 {
     }
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 #[inline(always)]
 pub fn rook_attacks(sq: Square, occ: u64) -> u64 {
     let mi = &*ROOK_MAGIC;
@@ -213,6 +373,7 @@ pub fn queen_attacks(sq: Square, occ: u64) -> u64 {
     bishop_attacks(sq, occ) | rook_attacks(sq, occ)
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MagicEntry {
@@ -222,14 +383,18 @@ struct MagicEntry {
     shift: u32,
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 struct MagicTable {
     entries: [MagicEntry; 64],
     table: Box<[u64]>,
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 static BISHOP_MAGIC: LazyLock<MagicTable> = LazyLock::new(|| build_magic_table(true));
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 static ROOK_MAGIC: LazyLock<MagicTable> = LazyLock::new(|| build_magic_table(false));
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 fn bishop_mask(sq: u8) -> u64 {
     let file = (sq % 8) as i8;
     let rank = (sq / 8) as i8;
@@ -247,6 +412,7 @@ fn bishop_mask(sq: u8) -> u64 {
     mask
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 fn rook_mask(sq: u8) -> u64 {
     let file = (sq % 8) as i8;
     let rank = (sq / 8) as i8;
@@ -274,10 +440,12 @@ fn rook_mask(sq: u8) -> u64 {
     mask
 }
 
+#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
 pub(crate) struct XorShift64 {
     state: u64,
 }
 
+#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
 impl XorShift64 {
     pub(crate) fn new(seed: u64) -> Self {
         Self { state: if seed == 0 { 1 } else { seed } }
@@ -292,6 +460,7 @@ impl XorShift64 {
     }
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 fn find_magic_for_sq(sq: u8, mask: u64, is_bishop: bool, rng: &mut XorShift64) -> (u64, Vec<u64>) {
     let bits = mask.count_ones();
     let n_entries = 1usize << bits;
@@ -339,6 +508,7 @@ fn find_magic_for_sq(sq: u8, mask: u64, is_bishop: bool, rng: &mut XorShift64) -
     }
 }
 
+#[cfg(not(all(target_feature = "bmi2", pext)))]
 fn build_magic_table(is_bishop: bool) -> MagicTable {
     let mut entries = [MagicEntry { mask: 0, magic: 0, offset: 0, shift: 0 }; 64];
     let mut table: Vec<u64> = Vec::new();

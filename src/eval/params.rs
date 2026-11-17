@@ -46,7 +46,7 @@ pub fn output_bucket(occupancy: u64) -> usize {
 
 pub struct NnueWeights {
     // 768 rows per king bucket.
-    pub ft_weights: crate::mem::HugeBuf<[i16; N_HIDDEN]>,
+    pub ft_weights: crate::mem::HugeBuf<FtRow>,
     pub ft_bias: [i16; N_HIDDEN],
     pub head_weights: [[i8; 2 * N_HIDDEN]; N_BUCKETS],
     // i16 copy for the SCReLU head, which multiplies in 16-bit lanes.
@@ -54,6 +54,15 @@ pub struct NnueWeights {
     pub head_bias_q: [i32; N_BUCKETS],
     // All zero for a plain net; one element.
     pub dense: crate::mem::HugeBuf<DenseWeights>,
+}
+
+// One feature's weights, padded by a cache line so the rows an update reads together don't all
+// land in the same L1 sets.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+pub struct FtRow {
+    pub w: [i16; N_HIDDEN],
+    _pad: [i16; 32],
 }
 
 #[derive(Clone, Copy)]
@@ -130,9 +139,9 @@ fn decode_weights() -> NnueWeights {
     let read_i16 = |i: usize| i16::from_le_bytes([RAW[i], RAW[i + 1]]);
     let mut cursor = if dense { HEADER + 8 } else { HEADER + 4 * N_BUCKETS };
 
-    let mut ft = unsafe { crate::mem::HugeBuf::<[i16; N_HIDDEN]>::zeroed(ft_rows) };
+    let mut ft = unsafe { crate::mem::HugeBuf::<FtRow>::zeroed(ft_rows) };
     for row in ft.iter_mut() {
-        for w in row.iter_mut() {
+        for w in row.w.iter_mut() {
             *w = read_i16(cursor);
             cursor += 2;
         }
