@@ -96,11 +96,22 @@ Supported `go` limits: `wtime`, `btime`, `winc`, `binc`, `movestogo`, `movetime`
 | Option | Default | Range | |
 |---|---|---|---|
 | Hash | 64 | 1-32768 | Transposition table size in MB |
+| Move Overhead | 15 | 0-5000 | Milliseconds kept back for GUI and OS latency (at most half of a `movetime`) |
+| NormalizeScore | true | | Report normalized scores (see below); `false` gives raw search scores |
 
 The other options (`RFPMargin`, `LMRBase`, `SEEQuietMargin`, ...) are search parameters
 exposed for SPSA tuning. The defaults are the tuned values; leave them alone for play.
 
-The non-standard `eval` command prints the static NNUE eval of the current position.
+Scores are normalized like Stockfish's: `cp 100` means the side to move wins about half
+its games from here. The conversion depends on the material left on the board and is
+fitted on Anvil's own self-play games.
+
+Non-standard commands:
+
+- `eval` prints the static NNUE eval of the current position.
+- `bench [depth]` searches a fixed set of 40 positions and prints `<nodes> nodes <nps> nps`.
+  The node count is the same on every machine, so it identifies the search. Running
+  `anvil-engine bench` from the command line does the same and exits.
 
 ## The net
 
