@@ -149,7 +149,7 @@ impl SearchCtx {
         if self.nodes >= self.max_nodes {
             self.stop = true;
         }
-        if self.nodes & 4095 == 0 {
+        if self.nodes & 1023 == 0 {
             if self.abort.load(Ordering::Relaxed) {
                 self.stop = true;
             }

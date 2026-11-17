@@ -37,23 +37,25 @@ pub struct Limits {
     pub soft_ms: u64,
     pub hard_ms: u64,
     pub max_nodes: u64,
+    /// When the clock started (the UCI `go` arrival); `None` starts it with the search.
+    pub start: Option<Instant>,
 }
 
 impl Limits {
     pub fn depth(d: u32) -> Self {
-        Self { max_depth: d, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: u64::MAX }
+        Self { max_depth: d, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: u64::MAX, start: None }
     }
     pub fn time(ms: u64) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: ms, hard_ms: ms, max_nodes: u64::MAX }
+        Self { max_depth: MAX_PLY as u32, soft_ms: ms, hard_ms: ms, max_nodes: u64::MAX, start: None }
     }
     pub fn nodes(n: u64) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: n }
+        Self { max_depth: MAX_PLY as u32, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: n, start: None }
     }
     pub fn infinite() -> Self {
         Self::depth(MAX_PLY as u32)
     }
     pub fn budget(b: TimeBudget) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: b.soft_ms, hard_ms: b.hard_ms, max_nodes: u64::MAX }
+        Self { max_depth: MAX_PLY as u32, soft_ms: b.soft_ms, hard_ms: b.hard_ms, max_nodes: u64::MAX, start: None }
     }
 }
 
@@ -152,7 +154,7 @@ fn run_search(
     params: SearchParams,
     mut on_iter: Option<&mut dyn FnMut(&IterInfo)>,
 ) -> (Option<Move>, i32, u64, u32) {
-    let start = Instant::now();
+    let start = limits.start.unwrap_or_else(Instant::now);
     let hard_deadline =
         if limits.hard_ms == u64::MAX { None } else { Some(start + Duration::from_millis(limits.hard_ms)) };
     // Stability scaling and the mate early-out only apply to clock budgets.

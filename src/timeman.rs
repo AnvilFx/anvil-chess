@@ -2,6 +2,7 @@
 
 use crate::chess::Color;
 
+/// Default for the `Move Overhead` option: time kept back for GUI and OS latency.
 pub const MOVE_OVERHEAD_MS: u64 = 15;
 
 /// Assumed moves remaining when `movestogo` is absent.
@@ -36,10 +37,10 @@ impl TimeBudget {
     }
 }
 
-pub fn allocate(go: &GoLimits, stm: Color) -> TimeBudget {
-    // Movetime is used in full; the overhead reserve only matters for a running clock.
+pub fn allocate(go: &GoLimits, stm: Color, overhead_ms: u64) -> TimeBudget {
+    // Keep the overhead back from movetime too, but never more than half of it.
     if let Some(mt) = go.movetime {
-        let t = mt.max(1);
+        let t = mt.saturating_sub(overhead_ms.min(mt / 2)).max(1);
         return TimeBudget { soft_ms: t, hard_ms: t };
     }
 
@@ -52,7 +53,7 @@ pub fn allocate(go: &GoLimits, stm: Color) -> TimeBudget {
         None => return TimeBudget::UNLIMITED,
     };
 
-    let usable = remaining.saturating_sub(MOVE_OVERHEAD_MS).max(1);
+    let usable = remaining.saturating_sub(overhead_ms).max(1);
 
     let mtg = go.movestogo.map(|m| (m as u64).max(1)).unwrap_or(MOVES_HORIZON);
 
@@ -107,22 +108,22 @@ mod tests {
     }
 
     #[test]
-    fn movetime_is_used_in_full() {
-        let go = GoLimits { movetime: Some(1000), ..Default::default() };
-        let b = allocate(&go, Color::White);
-        assert_eq!(b.soft_ms, 1000);
-        assert_eq!(b.hard_ms, 1000);
+    fn movetime_keeps_the_overhead_back() {
+        let at = |mt| allocate(&GoLimits { movetime: Some(mt), ..Default::default() }, Color::White, MOVE_OVERHEAD_MS);
+        assert_eq!(at(1000), TimeBudget { soft_ms: 985, hard_ms: 985 });
+        assert_eq!(at(10), TimeBudget { soft_ms: 5, hard_ms: 5 });
+        assert_eq!(at(1), TimeBudget { soft_ms: 1, hard_ms: 1 });
     }
 
     #[test]
     fn no_clock_is_unlimited() {
-        assert!(allocate(&GoLimits::default(), Color::White).is_unlimited());
+        assert!(allocate(&GoLimits::default(), Color::White, MOVE_OVERHEAD_MS).is_unlimited());
     }
 
     #[test]
     fn hard_never_risks_flagging() {
         for &(t, inc) in &[(1000u64, 0u64), (60_000, 1000), (300_000, 0), (200, 100)] {
-            let b = allocate(&go_clock(t, inc), Color::White);
+            let b = allocate(&go_clock(t, inc), Color::White, MOVE_OVERHEAD_MS);
             let usable = t - MOVE_OVERHEAD_MS;
             assert!(b.hard_ms <= usable, "hard {} must stay under usable {}", b.hard_ms, usable);
             assert!(b.soft_ms <= b.hard_ms, "soft {} <= hard {}", b.soft_ms, b.hard_ms);
@@ -132,22 +133,22 @@ mod tests {
 
     #[test]
     fn more_time_with_more_on_the_clock() {
-        let small = allocate(&go_clock(10_000, 0), Color::White);
-        let big = allocate(&go_clock(120_000, 0), Color::White);
+        let small = allocate(&go_clock(10_000, 0), Color::White, MOVE_OVERHEAD_MS);
+        let big = allocate(&go_clock(120_000, 0), Color::White, MOVE_OVERHEAD_MS);
         assert!(big.soft_ms > small.soft_ms);
     }
 
     #[test]
     fn movestogo_one_spends_a_big_share() {
-        let b = allocate(&GoLimits { wtime: Some(10_000), movestogo: Some(1), ..Default::default() }, Color::White);
+        let b = allocate(&GoLimits { wtime: Some(10_000), movestogo: Some(1), ..Default::default() }, Color::White, MOVE_OVERHEAD_MS);
         assert!(b.soft_ms >= 7_000, "movestogo=1 should spend a big share, got {}", b.soft_ms);
     }
 
     #[test]
     fn picks_side_to_move_clock() {
         let go = GoLimits { wtime: Some(100_000), btime: Some(1_000), ..Default::default() };
-        let w = allocate(&go, Color::White);
-        let b = allocate(&go, Color::Black);
+        let w = allocate(&go, Color::White, MOVE_OVERHEAD_MS);
+        let b = allocate(&go, Color::Black, MOVE_OVERHEAD_MS);
         assert!(w.soft_ms > b.soft_ms, "white has far more time than black");
     }
 

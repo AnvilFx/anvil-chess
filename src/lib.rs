@@ -1,3 +1,4 @@
+pub mod bench;
 pub mod chess;
 pub mod eval;
 pub mod mem;
