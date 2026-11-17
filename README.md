@@ -19,11 +19,12 @@ Banksia, fastchess, ...).
 - Repetition and fifty-move draw detection
 
 **Evaluation**
-- NNUE `(768x4 -> 1024)x2 -> 1x8`: four king buckets with horizontal mirroring,
-  SCReLU activation, eight output buckets by piece count
+- NNUE `(768x4 -> 1024)x2 -> (16 -> 32 -> 1)x8`: four king buckets with horizontal
+  mirroring, pairwise CReLU on the accumulator, a sparse int8 first dense layer, SCReLU
+  float layers after it, eight output buckets by piece count
 - Trained on 3.6B positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
-- AVX2 and AVX-VNNI paths selected at runtime, with a scalar fallback
+- AVX2, AVX-VNNI and AVX-512 VNNI paths selected at runtime, with a scalar fallback
 
 ## Strength
 
@@ -39,18 +40,27 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
-| 3.14.3 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 22 / 444 / 534 | -197 ± 16 | ~3571 |
-| 3.14.3 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 271 / 426 / 303 | -11 ± 16 | ~3645 |
-| 3.14.3 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 344 / 431 / 225 | +42 ± 16 | ~3693 |
-| 3.14.3 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 253 / 451 / 296 | -15 ± 16 | ~3636 |
-| 3.14.3 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 226 / 515 / 259 | -12 ± 15 | ~3633 |
-| 3.14.3 | Black Marlin 9.0 | 3622 | 20+0.2 | 1000 | 433 / 406 / 161 | +97 ± 17 | ~3719 |
-| 3.14.3 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 457 / 387 / 156 | +108 ± 17 | ~3699 |
-| 3.14.3 | Lambergar 1.5 | 3506 | 20+0.2 | 1000 | 645 / 305 / 50 | +238 ± 20 | ~3744 |
-| **Average** | | | | | | | **~3667** |
+| 3.15.0 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 22 / 441 / 537 | -198 ± 16 | ~3569 |
+| 3.15.0 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 38 / 470 / 492 | -170 ± 15 | ~3572 |
+| 3.15.0 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 121 / 505 / 374 | -90 ± 15 | ~3630 |
+| 3.15.0 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 109 / 474 / 417 | -111 ± 16 | ~3590 |
+| 3.15.0 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 291 / 405 / 304 | -5 ± 17 | ~3651 |
+| 3.15.0 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 341 / 450 / 209 | +46 ± 16 | ~3697 |
+| 3.15.0 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 287 / 431 / 282 | +2 ± 16 | ~3653 |
+| 3.15.0 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 277 / 470 / 253 | +8 ± 16 | ~3652 |
+| 3.15.0 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 404 / 460 / 136 | +95 ± 16 | ~3717 |
+| 3.15.0 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 500 / 351 / 149 | +127 ± 18 | ~3718 |
+| **Average** | | | | | | | **~3645** |
 
-Single thread for both engines, games played in colour-swapped opening pairs on an
-AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%, from W / D / L.
+Single thread for both engines, games played in colour-swapped opening pairs from the
+UHO 2024 book on an AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%,
+from W / D / L.
+
+The opponents are picked to sit above and below Anvil, because these unbalanced openings
+stretch Elo differences compared with CCRL: strong opponents give low estimates, weak ones
+high. Earlier versions were measured against a weaker field (with Lambergar 1.5, and Black
+Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On this field
+3.15.0 is lower, but head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at 5+0.05).
 
 ## Downloads
 
@@ -96,9 +106,10 @@ The net in `src/eval/net.nnue` is trained with
 Anvil's own self-play games, labelled with its own search scores and game results. No
 other engine's data or evals are used.
 
-- `tools/train/anvil.rs` is the bullet training config.
-- `tools/train/anvil_dense.rs` and `nets/bullet-kb4-dense.json` are an experimental net with
-  dense layers after the accumulator; the engine runs it with `DENSE = true` in `params.rs`.
+- `tools/train/anvil_dense.rs` is the bullet training config of the current net, trained
+  for 800 superbatches with `ANVIL_WDL=0.5` (half game result, half search score).
+- `tools/train/anvil.rs` and `nets/bullet-kb4.json` are the older net without dense layers;
+  the engine switches between the two with `DENSE` in `src/eval/params.rs`.
 - `tools/gen_net.py` quantizes a trained net into `net.nnue`. The header carries the
   quantization and bucket settings, so swapping in a net of the same shape needs no
   code changes.
@@ -106,9 +117,13 @@ other engine's data or evals are used.
   regenerated:
 
 ```sh
-python tools/gen_net.py nets/bullet-kb4-hl1024-3645m-wdl50.bin nets/bullet-kb4.json src/eval/net.nnue
+python tools/gen_net.py nets/bullet-kb4-dense1024-3645m-sb800-wdl50.bin nets/bullet-kb4-dense.json src/eval/net.nnue --permute <fens>
 cargo build --release
 ```
+
+`--permute` takes a file of self-play positions (`FEN | score | result` lines) and orders
+the hidden neurons by how often they are active, which makes the sparse first layer faster.
+Any sample gives the same evals; only the same sample gives the same bytes.
 
 A different hidden width or output bucket count also needs `N_HIDDEN` / `N_BUCKETS` in
 `src/eval/params.rs`.

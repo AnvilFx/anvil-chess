@@ -1,5 +1,5 @@
 // Copy into a bullet checkout (github.com/jw1912/bullet, tested at da426a4) as examples/anvil_dense.rs.
-// Anvil's dense net: (768x4 -> 1024)x2 -> pairwise CReLU -> (1024 -> 16 -> 32 -> 1)x8, SCReLU
+// Anvil's dense net: (768x4 -> HL)x2 (HL = $ANVIL_HL, default 1024) -> pairwise CReLU -> (HL -> 16 -> 32 -> 1)x8, SCReLU
 // between the dense layers, 4 horizontally mirrored king buckets (factorised), output buckets
 // by piece count. Saves plain f32 weights; tools/gen_net.py quantises them.
 //
@@ -21,7 +21,6 @@ use bullet_lib::{
     value::{ValueTrainerBuilder, loader::DirectSequentialDataLoader},
 };
 
-const HL_SIZE: usize = 1024;
 const L1_SIZE: usize = 16;
 const L2_SIZE: usize = 32;
 const NUM_OUTPUT_BUCKETS: usize = 8;
@@ -43,6 +42,8 @@ const NUM_INPUT_BUCKETS: usize = get_num_buckets(&BUCKET_LAYOUT);
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Hidden layer width; set ANVIL_HL to train another size (multiple of 64 so the engine's SIMD divides it).
+    let hl: usize = std::env::var("ANVIL_HL").map_or(1024, |s| s.parse().expect("ANVIL_HL"));
     let dataset_path = args.get(1).map(String::as_str).unwrap_or("data/kb4-train.data");
     let superbatches: usize = args.get(2).map_or(60, |s| s.parse().expect("superbatches"));
     let net_id = args.get(3).cloned().unwrap_or_else(|| "anvil-dense".to_string());
@@ -52,7 +53,7 @@ fn main() {
     let resume: Option<usize> = args.get(5).map(|s| s.parse().expect("resume superbatch"));
 
     // Kept equal to the plain config so the two nets differ only in the dense layers.
-    let wdl_proportion = 0.3;
+    let wdl_proportion: f32 = std::env::var("ANVIL_WDL").map_or(0.3, |s| s.parse().expect("ANVIL_WDL"));
     let initial_lr = 0.001;
     let final_lr = 0.001 * 0.3f32.powi(5);
 
@@ -79,19 +80,19 @@ fn main() {
         .loss_fn(|output, target| output.sigmoid().squared_error(target))
         .build(|builder, stm_inputs, ntm_inputs, output_buckets| {
             // Shared weights every bucket trains, so rare buckets start from a sensible net.
-            let l0f = builder.new_weights("l0f", Shape::new(HL_SIZE, 768), InitSettings::Zeroed);
-            let mut l0 = builder.new_affine("l0", 768 * NUM_INPUT_BUCKETS, HL_SIZE);
+            let l0f = builder.new_weights("l0f", Shape::new(hl, 768), InitSettings::Zeroed);
+            let mut l0 = builder.new_affine("l0", 768 * NUM_INPUT_BUCKETS, hl);
             l0.init_with_effective_input_size(32);
             l0.weights = l0.weights + l0f.repeat(NUM_INPUT_BUCKETS);
 
-            let l1 = builder.new_affine("l1", HL_SIZE, NUM_OUTPUT_BUCKETS * L1_SIZE);
+            let l1 = builder.new_affine("l1", hl, NUM_OUTPUT_BUCKETS * L1_SIZE);
             let l2 = builder.new_affine("l2", L1_SIZE, NUM_OUTPUT_BUCKETS * L2_SIZE);
             let l3 = builder.new_affine("l3", L2_SIZE, NUM_OUTPUT_BUCKETS);
 
             // Pairwise CReLU: each half of a side's accumulator multiplies the other half.
             let ft = |input, start, end| l0.slice(start, end).forward(input).crelu();
-            let stm_hidden = ft(stm_inputs, 0, HL_SIZE / 2) * ft(stm_inputs, HL_SIZE / 2, HL_SIZE);
-            let ntm_hidden = ft(ntm_inputs, 0, HL_SIZE / 2) * ft(ntm_inputs, HL_SIZE / 2, HL_SIZE);
+            let stm_hidden = ft(stm_inputs, 0, hl / 2) * ft(stm_inputs, hl / 2, hl);
+            let ntm_hidden = ft(ntm_inputs, 0, hl / 2) * ft(ntm_inputs, hl / 2, hl);
 
             let hl1 = stm_hidden.concat(ntm_hidden);
             let hl2 = l1.forward(hl1).select(output_buckets).screlu();
