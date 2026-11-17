@@ -12,7 +12,7 @@ pub const OUT_SCALE: i32 = 400;
 // Squared clipped ReLU; SCReLU sums are divided by QA to get back to QA * QB.
 pub const SCRELU: bool = true;
 // Dense nets: pairwise CReLU accumulator -> L1 (i8 weights) -> L2 -> 1 per output bucket, f32 after L1.
-pub const DENSE: bool = false;
+pub const DENSE: bool = true;
 pub const L1: usize = 16;
 pub const L2: usize = 32;
 // Kings on files e-h see the board flipped left-right.

@@ -277,6 +277,10 @@ fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i3
         s = l1_scalar(&act, l1w);
     }
 
+    #[cfg(target_arch = "x86_64")]
+    if std::is_x86_feature_detected!("fma") {
+        return unsafe { tail_fma(&s, bucket) };
+    }
     let mut h2 = d.l2b[bucket];
     for j in 0..L1 {
         let x = (s[j] as f32 * d.l1_dequant[bucket][j] + d.l1b[bucket][j]).clamp(0.0, 1.0);
@@ -291,6 +295,42 @@ fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i3
         out += w * x * x;
     }
     (out * OUT_SCALE as f32).round() as i32
+}
+
+// The f32 tail in 4 vectors of 8: L2 as broadcast-FMA rows, L3 as one dot and a horizontal sum.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn tail_fma(s: &[i32; L1], bucket: usize) -> i32 {
+    use std::arch::x86_64::*;
+    let d = &WEIGHTS.dense[0];
+    let (zero, one) = (_mm256_setzero_ps(), _mm256_set1_ps(1.0));
+    let x = |v| _mm256_min_ps(_mm256_max_ps(v, zero), one);
+    let mut h = [0f32; L1];
+    for half in 0..2 {
+        let o = half * 8;
+        let v = _mm256_cvtepi32_ps(_mm256_loadu_si256(s.as_ptr().add(o) as *const __m256i));
+        let v = x(_mm256_fmadd_ps(v, _mm256_loadu_ps(d.l1_dequant[bucket].as_ptr().add(o)), _mm256_loadu_ps(d.l1b[bucket].as_ptr().add(o))));
+        _mm256_storeu_ps(h.as_mut_ptr().add(o), _mm256_mul_ps(v, v));
+    }
+    let b = d.l2b[bucket].as_ptr();
+    let mut acc = [_mm256_loadu_ps(b), _mm256_loadu_ps(b.add(8)), _mm256_loadu_ps(b.add(16)), _mm256_loadu_ps(b.add(24))];
+    for j in 0..L1 {
+        let hj = _mm256_set1_ps(h[j]);
+        let w = d.l2w[bucket][j].as_ptr();
+        for (k, a) in acc.iter_mut().enumerate() {
+            *a = _mm256_fmadd_ps(hj, _mm256_loadu_ps(w.add(8 * k)), *a);
+        }
+    }
+    let w3 = d.l3w[bucket].as_ptr();
+    let mut sum = zero;
+    for (k, a) in acc.iter().enumerate() {
+        let v = x(*a);
+        sum = _mm256_fmadd_ps(_mm256_mul_ps(v, v), _mm256_loadu_ps(w3.add(8 * k)), sum);
+    }
+    let q = _mm_add_ps(_mm256_castps256_ps128(sum), _mm256_extractf128_ps(sum, 1));
+    let q = _mm_add_ps(q, _mm_movehl_ps(q, q));
+    let q = _mm_add_ss(q, _mm_shuffle_ps(q, q, 1));
+    ((d.l3b[bucket] + _mm_cvtss_f32(q)) * OUT_SCALE as f32).round() as i32
 }
 
 // Where one side's features live: its king bucket's 768 rows, and a file flip
