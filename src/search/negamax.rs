@@ -258,7 +258,7 @@ pub(super) fn search_root(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn negamax(
     board: &mut Board,
-    mut depth: u32,
+    depth: u32,
     mut alpha: i32,
     beta: i32,
     ply: u32,
@@ -337,11 +337,6 @@ pub(super) fn negamax(
         }
     }
 
-    // Without a TT move this node was never searched well; spend less on it.
-    if depth >= ctx.params.iir_min_depth as u32 && tt_move.is_none() && excluded.is_none() {
-        depth -= 1;
-    }
-
     let in_check = stm_in_check(board, ctx);
     let p = ctx.params;
     let cached = ctx.child_eval.filter(|c| c.0 == hash).map(|c| c.1);
@@ -382,7 +377,7 @@ pub(super) fn negamax(
         && beta.abs() < MATE_THRESHOLD
         && eval.unwrap() - p.rfp_margin * (depth as i32 - improving as i32) >= beta
     {
-        return beta;
+        return (eval.unwrap() + beta) / 2;
     }
 
     if !pv_node && allow_null && !in_check && depth >= p.nmp_min_depth as u32 {

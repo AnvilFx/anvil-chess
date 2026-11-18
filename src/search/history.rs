@@ -97,6 +97,8 @@ pub(super) struct HistRows {
     stm: Color,
     pub(super) threats: u64,
     cont: [usize; CONT_PLIES],
+    /// Squares from which each piece kind of ours would give direct check.
+    checks: [u64; 6],
 }
 
 impl HistRows {
@@ -108,7 +110,22 @@ impl HistRows {
         };
         let p0 = if (1..MAX_PLY).contains(&ply) { ctx.played[ply] } else { None };
         let p1 = if ply >= 2 && ply - 1 < MAX_PLY { ctx.played[ply - 1] } else { None };
-        Self { stm: board.side_to_move, threats: ctx.threats[ply], cont: [row(0, p0), row(1, p1)] }
+        let stm = board.side_to_move;
+        let ksq = lsb(board.piece_bb[stm.opp().idx()][PieceKind::King.idx()]);
+        let (b, r) = (bishop_attacks(ksq, board.occupancy), rook_attacks(ksq, board.occupancy));
+        let checks = [PAWN_ATTACKS[stm.opp().idx()][ksq.idx()], KNIGHT_ATTACKS[ksq.idx()], b, r, b | r, 0];
+        Self { stm, threats: ctx.threats[ply], cont: [row(0, p0), row(1, p1)], checks }
+    }
+
+    /// Ordering bonus for a quiet move that gives direct check from a square the opponent doesn't attack.
+    #[inline]
+    pub(super) fn check_bonus(&self, board: &Board, m: Move) -> i32 {
+        let kind = (board.mailbox[m.from().idx()].saturating_sub(1) % 6) as usize;
+        if self.checks[kind] & !self.threats & m.to().bb() != 0 {
+            16_000
+        } else {
+            0
+        }
     }
 
     /// piece_key as an index within a continuation row (< CONT_ROW).

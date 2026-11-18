@@ -12,8 +12,9 @@ Banksia, fastchess, ...).
 - Null move pruning, razoring, reverse futility pruning, futility pruning, late move pruning,
   SEE pruning, ProbCut
 - Late move reductions adjusted by history and by how the static eval changes after the move
-- Singular extensions with multi-cut, internal iterative reductions
-- Move ordering by TT move, SEE-scored captures, killers, history and continuation history
+- Singular extensions with multi-cut
+- Move ordering by TT move, SEE-scored captures, killers, history and continuation history,
+  plus a bonus for quiet checks to safe squares
 - Pawn-structure correction history for the static eval
 - Quiescence search with SEE filtering
 - Repetition and fifty-move draw detection
@@ -62,6 +63,7 @@ high. Earlier versions were measured against a weaker field (with Lambergar 1.5,
 Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On this field
 3.15.0 measured ~3645, though head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at
 5+0.05). 3.15.1 searches the same tree 18-28% faster and beats 3.15.0 by +44 ± 16 at 10+0.1.
+3.15.2 has search changes only and beats 3.15.1 by +11.7 ± 7.7 at 5+0.05.
 
 ## Downloads
 

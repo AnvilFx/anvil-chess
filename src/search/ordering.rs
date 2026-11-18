@@ -88,7 +88,7 @@ fn score_plain(m: Move, board: &Board, killers: &[Option<Move>; 2], ctx: &Search
     if killers[1] == Some(m) {
         return 39_000;
     }
-    rows.get(ctx, board, m)
+    rows.get(ctx, board, m) + rows.check_bonus(board, m)
 }
 
 pub(super) struct ScoredMoves {
