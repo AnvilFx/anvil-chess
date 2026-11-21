@@ -7,6 +7,14 @@
   Anvil
 </h1>
 
+<p align="center">
+  <a href="#strength"><img src="https://img.shields.io/badge/strength-~3660%20Elo-orange" alt="Strength: about 3660 Elo"></a>
+  <a href="#the-net"><img src="https://img.shields.io/badge/self--play%20data-3.6B%20positions-blue" alt="Self-play data: 3.6B positions"></a>
+  <a href="#uci"><img src="https://img.shields.io/badge/protocol-UCI-blue" alt="Protocol: UCI"></a>
+  <a href="#building"><img src="https://img.shields.io/badge/forged%20in-Rust-orange?logo=rust&logoColor=white" alt="Forged in Rust"></a>
+  <a href="https://github.com/AnvilFx/anvil-chess/releases/latest"><img src="https://img.shields.io/github/v/release/AnvilFx/anvil-chess?label=download&logo=github" alt="Download"></a>
+</p>
+
 A UCI chess engine written in Rust, with an NNUE evaluation trained only on its own
 self-play games. Anvil has no GUI; use it from any UCI interface (Cute Chess, Arena,
 Banksia, fastchess, ...).
