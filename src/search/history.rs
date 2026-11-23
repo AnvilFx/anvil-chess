@@ -60,8 +60,8 @@ pub(super) fn piece_key(board: &Board, m: Move) -> (u8, u8) {
     (board.mailbox[m.from().idx()].saturating_sub(1), m.to().idx() as u8)
 }
 
-/// Indexed `[stm][from attacked][to attacked][from][to]`.
-pub(super) type ButterflyHist = [[[[[i16; 64]; 64]; 2]; 2]; 2];
+/// Indexed `[stm][from attacked][to: safe, attacked and undefended, attacked and defended][from][to]`.
+pub(super) type ButterflyHist = [[[[[i16; 64]; 64]; 3]; 2]; 2];
 
 #[inline]
 pub(super) fn attacks_of_set(mut set: u64, f: impl Fn(usize) -> u64) -> u64 {
@@ -69,6 +69,24 @@ pub(super) fn attacks_of_set(mut set: u64, f: impl Fn(usize) -> u64) -> u64 {
     while set != 0 {
         t |= f(set.trailing_zeros() as usize);
         set &= set - 1;
+    }
+    t
+}
+
+/// Our pieces attacked by a lower-valued enemy piece: material the side to move must spend its tempo saving.
+pub(super) fn lesser_threats(board: &Board) -> u64 {
+    let (us, them) = (board.side_to_move.idx(), board.side_to_move.opp().idx());
+    let occ = board.occupancy;
+    let ours = &board.piece_bb[us];
+    let bb = &board.piece_bb[them];
+    let rq = ours[PieceKind::Rook.idx()] | ours[PieceKind::Queen.idx()];
+    let minors_up = ours[PieceKind::Knight.idx()] | ours[PieceKind::Bishop.idx()] | rq;
+    let mut t = attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[them][s]) & minors_up;
+    if rq != 0 {
+        t |= (attacks_of_set(bb[PieceKind::Knight.idx()], |s| KNIGHT_ATTACKS[s])
+            | attacks_of_set(bb[PieceKind::Bishop.idx()], |s| bishop_attacks(Square(s as u8), occ)))
+            & rq;
+        t |= attacks_of_set(bb[PieceKind::Rook.idx()], |s| rook_attacks(Square(s as u8), occ)) & ours[PieceKind::Queen.idx()];
     }
     t
 }
@@ -86,9 +104,34 @@ pub(super) fn threat_map(board: &Board) -> u64 {
         | attacks_of_set(bb[PieceKind::King.idx()], |s| KING_ATTACKS[s])
 }
 
+/// Squares the side to move attacks with a pawn, and squares it attacks with at least two pieces.
+pub(super) fn defence_maps(board: &Board) -> (u64, u64) {
+    let us = board.side_to_move.idx();
+    let occ = board.occupancy;
+    let bb = &board.piece_bb[us];
+    let pawns = attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[us][s]);
+    let (mut once, mut twice) = (pawns, 0u64);
+    let mut add = |a: u64| {
+        twice |= once & a;
+        once |= a;
+    };
+    let mut each = |mut set: u64, f: &dyn Fn(usize) -> u64| {
+        while set != 0 {
+            add(f(set.trailing_zeros() as usize));
+            set &= set - 1;
+        }
+    };
+    each(bb[PieceKind::Knight.idx()], &|s| KNIGHT_ATTACKS[s]);
+    each(bb[PieceKind::Bishop.idx()] | bb[PieceKind::Queen.idx()], &|s| bishop_attacks(Square(s as u8), occ));
+    each(bb[PieceKind::Rook.idx()] | bb[PieceKind::Queen.idx()], &|s| rook_attacks(Square(s as u8), occ));
+    each(bb[PieceKind::King.idx()], &|s| KING_ATTACKS[s]);
+    (once, twice)
+}
+
 #[inline]
-pub(super) fn butterfly_slot(threats: u64, m: Move) -> (usize, usize) {
-    ((threats >> m.from().idx()) as usize & 1, (threats >> m.to().idx()) as usize & 1)
+pub(super) fn butterfly_slot(threats: u64, defended: u64, m: Move) -> (usize, usize) {
+    let tt = (threats >> m.to().idx()) as usize & 1;
+    ((threats >> m.from().idx()) as usize & 1, tt + (tt & (defended >> m.to().idx()) as usize))
 }
 
 /// A node's quiet-history context (side, threats, continuation rows), fixed over its move loop.
@@ -96,6 +139,7 @@ pub(super) fn butterfly_slot(threats: u64, m: Move) -> (usize, usize) {
 pub(super) struct HistRows {
     stm: Color,
     pub(super) threats: u64,
+    defended: (u64, u64),
     cont: [usize; CONT_PLIES],
     /// Squares from which each piece kind of ours would give direct check.
     checks: [u64; 6],
@@ -114,7 +158,7 @@ impl HistRows {
         let ksq = lsb(board.piece_bb[stm.opp().idx()][PieceKind::King.idx()]);
         let (b, r) = (bishop_attacks(ksq, board.occupancy), rook_attacks(ksq, board.occupancy));
         let checks = [PAWN_ATTACKS[stm.opp().idx()][ksq.idx()], KNIGHT_ATTACKS[ksq.idx()], b, r, b | r, 0];
-        Self { stm, threats: ctx.threats[ply], cont: [row(0, p0), row(1, p1)], checks }
+        Self { stm, threats: ctx.threats[ply], defended: ctx.defended[ply], cont: [row(0, p0), row(1, p1)], checks }
     }
 
     /// Ordering bonus for a quiet move that gives direct check from a square the opponent doesn't attack.
@@ -128,6 +172,16 @@ impl HistRows {
         }
     }
 
+    /// Squares that stay defended once `m`'s piece has moved (a non-pawn mover attacks its own target).
+    #[inline]
+    fn defenders(&self, board: &Board, m: Move) -> u64 {
+        if board.mailbox[m.from().idx()].saturating_sub(1) as usize % 6 == PieceKind::Pawn.idx() {
+            self.defended.0
+        } else {
+            self.defended.1
+        }
+    }
+
     /// piece_key as an index within a continuation row (< CONT_ROW).
     #[inline]
     fn cont_key(board: &Board, m: Move) -> usize {
@@ -136,7 +190,7 @@ impl HistRows {
 
     #[inline]
     pub(super) fn get(&self, ctx: &SearchCtx, board: &Board, m: Move) -> i32 {
-        let (tf, tt) = butterfly_slot(self.threats, m);
+        let (tf, tt) = butterfly_slot(self.threats, self.defenders(board, m), m);
         let h = ctx.history_heur[self.stm.idx()][tf][tt][m.from().idx()][m.to().idx()] as i32;
         let k = Self::cont_key(board, m);
         let d = &ctx.cont.data;
@@ -146,7 +200,7 @@ impl HistRows {
     /// Gravity update of `m`'s butterfly and continuation entries; the zero row is skipped.
     #[inline]
     pub(super) fn add(&self, ctx: &mut SearchCtx, board: &Board, m: Move, delta: i32) {
-        let (tf, tt) = butterfly_slot(self.threats, m);
+        let (tf, tt) = butterfly_slot(self.threats, self.defenders(board, m), m);
         let e = &mut ctx.history_heur[self.stm.idx()][tf][tt][m.from().idx()][m.to().idx()];
         let v = *e as i32;
         *e = (v + delta - v * delta.abs() / HISTORY_MAX) as i16;

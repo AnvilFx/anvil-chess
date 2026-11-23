@@ -152,10 +152,11 @@ fn print_info(info: &IterInfo, scale: Option<i32>) {
     let nps = info.nodes * 1000 / info.elapsed_ms.max(1);
     let pv: Vec<String> = info.pv.iter().map(|m| m.to_string()).collect();
     println!(
-        "info depth {} seldepth {} score {} nodes {} nps {} hashfull {} time {} pv {}",
+        "info depth {} seldepth {} score {}{} nodes {} nps {} hashfull {} time {} pv {}",
         info.depth,
         info.seldepth,
         format_score(info.score, scale),
+        if info.lower_bound { " lowerbound" } else { "" },
         info.nodes,
         nps,
         info.hashfull,

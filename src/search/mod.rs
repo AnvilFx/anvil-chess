@@ -36,26 +36,47 @@ pub struct Limits {
     pub max_depth: u32,
     pub soft_ms: u64,
     pub hard_ms: u64,
+    /// No new iteration starts once this many nodes are searched.
+    pub soft_nodes: u64,
+    /// The search stops mid-iteration at this many nodes.
     pub max_nodes: u64,
     /// When the clock started (the UCI `go` arrival); `None` starts it with the search.
     pub start: Option<Instant>,
 }
 
+/// `go nodes N`: N is a soft limit checked between iterations; the hard cap is N times this.
+pub const NODES_HARD_MUL: u64 = 8;
+
 impl Limits {
     pub fn depth(d: u32) -> Self {
-        Self { max_depth: d, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: u64::MAX, start: None }
+        Self { max_depth: d, soft_ms: u64::MAX, hard_ms: u64::MAX, soft_nodes: u64::MAX, max_nodes: u64::MAX, start: None }
     }
     pub fn time(ms: u64) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: ms, hard_ms: ms, max_nodes: u64::MAX, start: None }
+        Self { max_depth: MAX_PLY as u32, soft_ms: ms, hard_ms: ms, soft_nodes: u64::MAX, max_nodes: u64::MAX, start: None }
     }
+    /// Finishes the iteration that crosses `n` nodes, stopping mid-iteration only at `n * NODES_HARD_MUL`.
     pub fn nodes(n: u64) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: u64::MAX, hard_ms: u64::MAX, max_nodes: n, start: None }
+        Self {
+            max_depth: MAX_PLY as u32,
+            soft_ms: u64::MAX,
+            hard_ms: u64::MAX,
+            soft_nodes: n,
+            max_nodes: n.saturating_mul(NODES_HARD_MUL),
+            start: None,
+        }
     }
     pub fn infinite() -> Self {
         Self::depth(MAX_PLY as u32)
     }
     pub fn budget(b: TimeBudget) -> Self {
-        Self { max_depth: MAX_PLY as u32, soft_ms: b.soft_ms, hard_ms: b.hard_ms, max_nodes: u64::MAX, start: None }
+        Self {
+            max_depth: MAX_PLY as u32,
+            soft_ms: b.soft_ms,
+            hard_ms: b.hard_ms,
+            soft_nodes: u64::MAX,
+            max_nodes: u64::MAX,
+            start: None,
+        }
     }
 }
 
@@ -68,6 +89,8 @@ pub struct IterInfo<'a> {
     pub elapsed_ms: u64,
     pub hashfull: u32,
     pub pv: &'a [Move],
+    /// The iteration ended on a root fail high, so `score` is a lower bound.
+    pub lower_bound: bool,
 }
 
 pub struct Engine {
@@ -124,6 +147,36 @@ impl Default for Engine {
 }
 
 const MAX_PLY: usize = 128;
+
+/// `first` followed by the TT's best moves, for display only. Stops at a missing or
+/// illegal move, a repeated position, or `max_len` moves.
+fn pv_from_tt(board: &mut Board, first: Move, tt: &Tt, max_len: usize) -> Vec<Move> {
+    let mut line = vec![first];
+    let mut undos = vec![board.make_move(first)];
+    let mut seen = vec![board.hash];
+    while line.len() < max_len.max(1) {
+        let Some(e) = tt.probe(board.hash) else { break };
+        if e.move_packed == 0 {
+            break;
+        }
+        let m = Move(e.move_packed);
+        let mut legal = MoveList::new();
+        board.gen_legal_into(&mut legal);
+        if !legal.iter().any(|x| x == m) {
+            break;
+        }
+        undos.push(board.make_move(m));
+        line.push(m);
+        if seen.contains(&board.hash) {
+            break;
+        }
+        seen.push(board.hash);
+    }
+    for (m, u) in line.iter().zip(undos).rev() {
+        board.unmake_move(*m, u);
+    }
+    line
+}
 /// Node-based time scaling starts once this many iterations have completed.
 const NODE_TM_MIN_DEPTH: u32 = 7;
 
@@ -171,6 +224,9 @@ fn run_search(
 
     for d in 1..=limits.max_depth.min(MAX_PLY as u32) {
         // Depth 1 always runs so there is a move to return.
+        if d > 1 && ctx.nodes >= limits.soft_nodes {
+            break;
+        }
         if limits.soft_ms != u64::MAX && d > 1 {
             let target = if fixed_time {
                 limits.soft_ms
@@ -186,7 +242,7 @@ fn run_search(
             }
         }
 
-        let (m, s) = search_root_aspiration(board, d, best_move, best_score, ctx, tt);
+        let (m, s, lower_bound) = search_root_aspiration(board, d, best_move, best_score, ctx, tt);
         if ctx.stop && d > 1 {
             // A stopped iteration only returns a move that was fully searched and beat
             // the previous best at this depth, so it is the better choice.
@@ -204,8 +260,14 @@ fn run_search(
 
             if let Some(report) = on_iter.as_mut() {
                 let root_pv = ctx.root_pv();
-                let single = [mv];
-                let pv = if root_pv.first() == m.as_ref() { root_pv } else { &single };
+                let tt_line;
+                let pv = if root_pv.first() == m.as_ref() && root_pv.len() > 1 {
+                    root_pv
+                } else {
+                    // A fail high records no line below the root move; the TT still has one.
+                    tt_line = pv_from_tt(board, mv, tt, d as usize);
+                    &tt_line[..]
+                };
                 report(&IterInfo {
                     depth: d,
                     seldepth: ctx.seldepth as u32,
@@ -214,6 +276,7 @@ fn run_search(
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     hashfull: tt.hashfull(),
                     pv,
+                    lower_bound,
                 });
             }
         }

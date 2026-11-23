@@ -22,14 +22,21 @@ Banksia, fastchess, ...).
 ## Features
 
 **Search**
-- Iterative deepening, principal variation search, aspiration windows
+- Iterative deepening, principal variation search, aspiration windows; a root fail high
+  ends the iteration without a re-search
 - Transposition table (4-entry buckets, 64 MB by default), backed by huge pages on Linux
 - Null move pruning, razoring, reverse futility pruning, futility pruning, late move pruning,
   SEE pruning, ProbCut
-- Late move reductions adjusted by history and by how the static eval changes after the move
+- Null move pruning is skipped when the opponent's last-moved piece can be won, and a null
+  search that only just fails searches the node one ply shallower
+- Reverse futility pruning needs a larger margin while a piece is attacked by a lesser one
+- Late move reductions adjusted by history, by how the static eval changes after the move,
+  by how far that eval is from alpha, and less for a move that beats every earlier move's
+  eval change
 - Singular extensions with multi-cut
 - Move ordering by TT move, SEE-scored captures, killers, history and continuation history,
-  plus a bonus for quiet checks to safe squares
+  plus a bonus for quiet checks to safe squares; history is split by whether the destination
+  is attacked, and if so whether it is defended
 - Pawn-structure correction history for the static eval
 - Quiescence search with SEE filtering
 - Repetition and fifty-move draw detection
@@ -78,7 +85,8 @@ high. Earlier versions were measured against a weaker field (with Lambergar 1.5,
 Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On this field
 3.15.0 measured ~3645, though head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at
 5+0.05). 3.15.1 searches the same tree 18-28% faster and beats 3.15.0 by +44 ± 16 at 10+0.1.
-3.15.2 has search changes only and beats 3.15.1 by +11.7 ± 7.7 at 5+0.05.
+3.15.2 has search changes only and beats 3.15.1 by +11.7 ± 7.7 at 5+0.05. 3.15.3 also has
+search changes only and beats 3.15.2 by +14.6 ± 8.8 at 10+0.1.
 
 ## Downloads
 
@@ -108,7 +116,8 @@ newer but very slow on Zen 1 and Zen 2, so remove it when building for those.
 ## UCI
 
 Supported `go` limits: `wtime`, `btime`, `winc`, `binc`, `movestogo`, `movetime`,
-`depth`, `nodes`, `infinite`. Anvil searches with one thread.
+`depth`, `nodes`, `infinite`. Anvil searches with one thread. `nodes N` finishes the
+iteration in progress once N nodes are searched and stops mid-iteration only at 8 x N.
 
 | Option | Default | Range | |
 |---|---|---|---|
@@ -121,7 +130,8 @@ exposed for SPSA tuning. The defaults are the tuned values; leave them alone for
 
 Scores are normalized like Stockfish's: `cp 100` means the side to move wins about half
 its games from here. The conversion depends on the material left on the board and is
-fitted on Anvil's own self-play games.
+fitted on Anvil's own self-play games. An iteration that ends on a root fail high reports
+`score cp <x> lowerbound`: the score is at least that.
 
 Non-standard commands:
 

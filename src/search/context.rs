@@ -22,6 +22,8 @@ pub(super) struct SearchCtx {
     pub(super) history_heur: Box<ButterflyHist>,
     /// Squares the opponent attacks at each ply of the current path, for history indexing.
     pub(super) threats: [u64; MAX_PLY + 1],
+    /// defence_maps at each ply of the current path.
+    pub(super) defended: [(u64, u64); MAX_PLY + 1],
     pub(super) cont: ContHist,
     /// The (piece, to) move that led into each ply.
     pub(super) played: [Option<(u8, u8)>; MAX_PLY],
@@ -57,8 +59,9 @@ impl SearchCtx {
             pv: Box::new([[Move::NULL; MAX_PLY + 1]; MAX_PLY + 1]),
             pv_len: [0; MAX_PLY + 1],
             killers: [[None; 2]; MAX_PLY],
-            history_heur: Box::new([[[[[0; 64]; 64]; 2]; 2]; 2]),
+            history_heur: Box::new([[[[[0; 64]; 64]; 3]; 2]; 2]),
             threats: [0; MAX_PLY + 1],
+            defended: [(0, 0); MAX_PLY + 1],
             cont: ContHist::new(),
             played: [None; MAX_PLY],
             evals: [None; MAX_PLY],
@@ -106,7 +109,7 @@ impl SearchCtx {
 
     pub(super) fn clear_heuristics(&mut self) {
         self.killers = [[None; 2]; MAX_PLY];
-        *self.history_heur = [[[[[0; 64]; 64]; 2]; 2]; 2];
+        *self.history_heur = [[[[[0; 64]; 64]; 3]; 2]; 2];
         self.cont.clear();
         self.corr.iter_mut().for_each(|t| t.fill(0));
     }

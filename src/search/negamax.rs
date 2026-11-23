@@ -92,6 +92,28 @@ pub(super) fn tt_move_is_legal(board: &Board, m: Move, in_check: bool) -> bool {
     (bishop_attacks(king, occ) & diag) | (rook_attacks(king, occ) & orth) == 0
 }
 
+/// SEE-scale gain from taking the piece the opponent just moved, which a null move would let it save.
+#[inline]
+fn last_moved_en_prise(board: &Board, ctx: &SearchCtx, ply: usize) -> i32 {
+    let Some((_, to)) = ctx.played[ply] else { return 0 };
+    let sq = Square(to);
+    let us = board.side_to_move;
+    let Some(pc) = board.piece_at(sq) else { return 0 };
+    if pc.color == us || pc.kind == PieceKind::King {
+        return 0;
+    }
+    let att = board.attackers_of_square(sq, us);
+    if att == 0 {
+        return 0;
+    }
+    let v = SEE_VALUES[pc.kind.idx()];
+    if board.attackers_of_square(sq, us.opp()) == 0 {
+        return v;
+    }
+    let cheapest = (0..6).find(|&k| att & board.piece_bb[us.idx()][k] != 0).map_or(v, |k| SEE_VALUES[k]);
+    (v - cheapest).max(0)
+}
+
 /// Only dead draws (K vs K, K+minor vs K); KN vs KN and similar are left to eval.
 #[inline]
 pub(super) fn is_insufficient_material(board: &Board) -> bool {
@@ -115,6 +137,7 @@ pub(super) fn is_insufficient_material(board: &Board) -> bool {
 }
 
 /// On fail high the new move is adopted at once; on fail low the previous best is kept.
+/// The flag is true when the iteration ended on such a fail high, so the score is only a lower bound.
 pub(super) fn search_root_aspiration(
     board: &mut Board,
     depth: u32,
@@ -122,10 +145,11 @@ pub(super) fn search_root_aspiration(
     prev_score: i32,
     ctx: &mut SearchCtx,
     tt: &mut Tt,
-) -> (Option<Move>, i32) {
+) -> (Option<Move>, i32, bool) {
     let p = ctx.params;
     if depth < p.asp_min_depth as u32 || prev_score.abs() >= MATE_THRESHOLD {
-        return search_root(board, depth, prev_best, -INF, INF, ctx, tt);
+        let (m, s) = search_root(board, depth, prev_best, -INF, INF, ctx, tt);
+        return (m, s, false);
     }
 
     let mut delta = p.asp_delta;
@@ -141,21 +165,22 @@ pub(super) fn search_root_aspiration(
                     best = Some(mm);
                 }
             }
-            return (best, s);
+            return (best, s, false);
         }
         if s <= alpha {
             beta = (alpha + beta) / 2;
             alpha = (s - delta).max(-INF);
         } else if s >= beta {
-            if let Some(mm) = m {
-                best = Some(mm);
+            // A fail-high is never re-searched: the next iteration measures it.
+            if m.is_some() {
+                return (m, s, true);
             }
             beta = (s + delta).min(INF);
         } else {
             if let Some(mm) = m {
                 best = Some(mm);
             }
-            return (best, s);
+            return (best, s, false);
         }
         delta += delta / 2 + 1;
         if delta >= p.asp_full_window {
@@ -192,6 +217,7 @@ pub(super) fn search_root(
     ctx.evals[0] = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let tt_move = tt.probe(root_hash).map(|e| Move(e.move_packed));
     ctx.threats[0] = threat_map(board);
+    ctx.defended[0] = defence_maps(board);
     let mut sm = ScoredMoves::from_list(&moves, board, pv, tt_move, ctx, 0);
     let mut best: Option<Move> = None;
     let mut best_score = -INF;
@@ -250,7 +276,9 @@ pub(super) fn search_root(
         BOUND_UPPER
     };
     if best.is_some() {
-        tt.store(root_hash, best, tt_score_to_store(best_score, 0), raw_eval, depth.min(255) as u8, bound, true);
+        // After a fail-low `best` only has the highest upper bound; keep the stored move so the re-search starts with it.
+        let mv = if bound == BOUND_UPPER { None } else { best };
+        tt.store(root_hash, mv, tt_score_to_store(best_score, 0), raw_eval, depth.min(255) as u8, bound, true);
     }
     (best, best_score)
 }
@@ -376,17 +404,24 @@ pub(super) fn negamax(
         && depth <= p.rfp_max_depth as u32
         && beta.abs() < MATE_THRESHOLD
         && eval.unwrap() - p.rfp_margin * (depth as i32 - improving as i32) >= beta
+        // A threatened piece costs the tempo the margin assumes we have: then demand one more depth of margin.
+        && (eval.unwrap() - p.rfp_margin * (depth as i32 - improving as i32) - p.rfp_margin * p.rfp_threat_depth / 64 >= beta
+            || lesser_threats(board) == 0)
     {
         return (eval.unwrap() + beta) / 2;
     }
 
+    let mut near_null = false;
     if !pv_node && allow_null && !in_check && depth >= p.nmp_min_depth as u32 {
         let stm_idx = board.side_to_move.idx();
         let non_pawn_bb = board.piece_bb[stm_idx][PieceKind::Knight.idx()]
             | board.piece_bb[stm_idx][PieceKind::Bishop.idx()]
             | board.piece_bb[stm_idx][PieceKind::Rook.idx()]
             | board.piece_bb[stm_idx][PieceKind::Queen.idx()];
-        if non_pawn_bb != 0 && eval.unwrap() >= beta {
+        if non_pawn_bb != 0
+            && eval.unwrap() >= beta
+            && eval.unwrap() - beta >= p.nmp_en_prise_mul * last_moved_en_prise(board, ctx, ply_us) / 16
+        {
             let r = p.nmp_base_r as u32 + (depth / p.nmp_divisor as u32);
             let undo = board.make_null_move();
             tt.prefetch(board.hash);
@@ -408,8 +443,11 @@ pub(super) fn negamax(
             if null_score >= beta {
                 return beta;
             }
+            // A pass that only just failed suggests a real move will hold: search one ply shallower.
+            near_null = null_score >= beta - p.nmp_near_margin;
         }
     }
+    let depth = depth - near_null as u32;
 
     // ProbCut: a capture that clears beta by a margin at reduced depth very likely refutes this node.
     let pc_beta = beta + p.probcut_margin;
@@ -475,6 +513,7 @@ pub(super) fn negamax(
 
     let threats = threat_map(board);
     ctx.threats[ply_us] = threats;
+    ctx.defended[ply_us] = defence_maps(board);
     let rows = HistRows::new(ctx, board, ply_us);
     let mut sm = ScoredMoves::empty();
     match early_tt {
@@ -485,6 +524,8 @@ pub(super) fn negamax(
     let mut best_score = -INF;
     let mut searched_quiets: [Move; 64] = [Move(0); 64];
     let mut sq_n: usize = 0;
+    // Best post-move eval gain among the reduced siblings so far.
+    let mut best_delta = i32::MAX;
 
     // Quiets dropped once pruning covers them all; they still count toward the move index.
     let mut skipped = 0usize;
@@ -629,11 +670,23 @@ pub(super) fn negamax(
                 if let (Some(se), false) = (static_eval, gives_check) {
                     let raw = tt.probe(board.hash).and_then(|e| e.eval()).unwrap_or_else(|| ctx.accs.evaluate(board));
                     ctx.child_eval = Some((board.hash, raw));
-                    let delta = -ctx.corrected_eval(board, raw) - se;
+                    let after = -ctx.corrected_eval(board, raw);
+                    let delta = after - se;
                     if delta > 0 && r >= p.lmr_eval_gain_min {
                         r -= p.lmr_eval_gain;
                     } else if delta < -p.lmr_eval_drop_margin {
                         r += p.lmr_eval_drop;
+                    }
+                    // A late move that looks better than every reduced sibling before it breaks a record.
+                    if best_delta == i32::MAX {
+                        best_delta = delta;
+                    } else if delta > best_delta {
+                        best_delta = delta;
+                        r -= p.lmr_record;
+                    }
+                    // A move whose eval already clears alpha can change the result; one far below it hardly can.
+                    if alpha.abs() < MATE_THRESHOLD {
+                        r -= ((after - alpha) * p.lmr_voi_mul / 8).clamp(-p.lmr_voi_clamp, p.lmr_voi_clamp);
                     }
                 }
                 reduced = (new_depth as i32 - r / 1024).clamp(1, new_depth.max(1) as i32) as u32;
@@ -828,6 +881,6 @@ pub(super) fn qsearch(board: &mut Board, mut alpha: i32, beta: i32, ply: u32, ct
     }
 
     let bound = if best_score > original_alpha { BOUND_EXACT } else { BOUND_UPPER };
-    tt.store(hash, best_move, tt_score_to_store(best_score, ply_i), raw_eval, 0, bound, tt_pv);
+    tt.store(hash, if bound == BOUND_UPPER { None } else { best_move }, tt_score_to_store(best_score, ply_i), raw_eval, 0, bound, tt_pv);
     best_score
 }

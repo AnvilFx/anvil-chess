@@ -74,6 +74,17 @@ pub const PARAM_SPECS: &[ParamSpec] = &[
     ParamSpec { name: "TmFall", default: 54, min: 0, max: 150 },
     ParamSpec { name: "TmNodeBase", default: 155, min: 110, max: 250 },
     ParamSpec { name: "TmNodeScale", default: 186, min: 50, max: 300 },
+    // RFP with a piece attacked by a lesser one: extra margin of RFPMargin * RFPThreatDepth / 64.
+    ParamSpec { name: "RFPThreatDepth", default: 64, min: 0, max: 192 },
+    // NMP is skipped unless eval - beta >= NMPEnPriseMul / 16 x the SEE gain on the opponent's last-moved piece.
+    ParamSpec { name: "NMPEnPriseMul", default: 32, min: 0, max: 96 },
+    // A failed null search within NMPNearMargin cp of beta searches the node one ply shallower.
+    ParamSpec { name: "NMPNearMargin", default: 60, min: 0, max: 200 },
+    // LMR, 1/1024 ply: a reduced move setting the node's post-move eval-gain record.
+    ParamSpec { name: "LMRRecord", default: 768, min: 0, max: 2048 },
+    // LMR -= clamp((post-move eval - alpha) * LMRVoiMul / 8, +-LMRVoiClamp).
+    ParamSpec { name: "LMRVoiMul", default: 24, min: 0, max: 64 },
+    ParamSpec { name: "LMRVoiClamp", default: 768, min: 0, max: 2048 },
 ];
 
 #[derive(Clone, Copy)]
@@ -132,6 +143,12 @@ pub struct SearchParams {
     pub tm_fall: i32,
     pub tm_node_base: i32,
     pub tm_node_scale: i32,
+    pub rfp_threat_depth: i32,
+    pub nmp_en_prise_mul: i32,
+    pub nmp_near_margin: i32,
+    pub lmr_record: i32,
+    pub lmr_voi_mul: i32,
+    pub lmr_voi_clamp: i32,
 }
 
 impl Default for SearchParams {
@@ -192,6 +209,12 @@ impl Default for SearchParams {
             tm_fall: 54,
             tm_node_base: 155,
             tm_node_scale: 186,
+            rfp_threat_depth: 64,
+            nmp_en_prise_mul: 32,
+            nmp_near_margin: 60,
+            lmr_record: 768,
+            lmr_voi_mul: 24,
+            lmr_voi_clamp: 768,
         }
     }
 }
@@ -258,6 +281,12 @@ impl SearchParams {
             "TmFall" => self.tm_fall = v,
             "TmNodeBase" => self.tm_node_base = v,
             "TmNodeScale" => self.tm_node_scale = v,
+            "RFPThreatDepth" => self.rfp_threat_depth = v,
+            "NMPEnPriseMul" => self.nmp_en_prise_mul = v,
+            "NMPNearMargin" => self.nmp_near_margin = v,
+            "LMRRecord" => self.lmr_record = v,
+            "LMRVoiMul" => self.lmr_voi_mul = v,
+            "LMRVoiClamp" => self.lmr_voi_clamp = v,
             _ => return false,
         }
         true
