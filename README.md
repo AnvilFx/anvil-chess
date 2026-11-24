@@ -15,6 +15,12 @@
   <a href="https://github.com/AnvilFx/anvil-chess/releases/latest"><img src="https://img.shields.io/github/v/release/AnvilFx/anvil-chess?label=download&logo=github" alt="Download"></a>
 </p>
 
+<p align="center"><em>
+  Make your move and make it wise, I see through every thin disguise.<br>
+  Your boldest trap, your best surprise, your gambits dressed in clever lies,<br>
+  I'll watch them with my Anvil Eyes, and with those eyes, I'll analyze.
+</em></p>
+
 A UCI chess engine written in Rust, with an NNUE evaluation trained only on its own
 self-play games. Anvil has no GUI; use it from any UCI interface (Cute Chess, Arena,
 Banksia, fastchess, ...).
