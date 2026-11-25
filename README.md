@@ -53,6 +53,7 @@ Banksia, fastchess, ...).
   float layers after it, eight output buckets by piece count
 - Trained on 3.6B positions from Anvil's own self-play
 - Incrementally updated accumulators with a per-king-bucket refresh cache
+- A 2 MB eval cache keyed by the full hash, prefetched along with the TT entry
 - AVX2, AVX-VNNI and AVX-512 paths selected at runtime, with a scalar fallback
 
 ## Strength
