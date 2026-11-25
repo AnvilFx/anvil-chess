@@ -8,7 +8,7 @@
 </h1>
 
 <p align="center">
-  <a href="#strength"><img src="https://img.shields.io/badge/strength-~3660%20Elo-orange" alt="Strength: about 3660 Elo"></a>
+  <a href="#strength"><img src="https://img.shields.io/badge/strength-~3685%20Elo-orange" alt="Strength: about 3685 Elo"></a>
   <a href="#the-net"><img src="https://img.shields.io/badge/self--play%20data-3.6B%20positions-blue" alt="Self-play data: 3.6B positions"></a>
   <a href="#uci"><img src="https://img.shields.io/badge/protocol-UCI-blue" alt="Protocol: UCI"></a>
   <a href="#building"><img src="https://img.shields.io/badge/forged%20in-Rust-orange?logo=rust&logoColor=white" alt="Forged in Rust"></a>
@@ -70,21 +70,21 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
-| 3.15.1 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 40 / 442 / 518 | -181 ± 16 | ~3586 |
-| 3.15.1 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 55 / 458 / 487 | -161 ± 16 | ~3581 |
-| 3.15.1 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 158 / 467 / 375 | -77 ± 16 | ~3643 |
-| 3.15.1 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 126 / 485 / 389 | -94 ± 15 | ~3607 |
-| 3.15.1 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 334 / 410 / 256 | +27 ± 17 | ~3683 |
-| 3.15.1 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 379 / 417 / 204 | +61 ± 17 | ~3712 |
-| 3.15.1 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 317 / 452 / 231 | +30 ± 16 | ~3681 |
-| 3.15.1 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 278 / 522 / 200 | +27 ± 15 | ~3671 |
-| 3.15.1 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 422 / 444 / 134 | +103 ± 16 | ~3725 |
-| 3.15.1 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 524 / 330 / 146 | +138 ± 18 | ~3729 |
-| **Average** | | | | | | | **~3662** |
+| 3.15.4 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 54 / 450 / 496 | -165 ± 8 | ~3602 |
+| 3.15.4 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 68 / 467 / 465 | -146 ± 9 | ~3596 |
+| 3.15.4 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 161 / 514 / 325 | -58 ± 11 | ~3663 |
+| 3.15.4 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 160 / 484 / 356 | -69 ± 11 | ~3632 |
+| 3.15.4 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 367 / 398 / 235 | +46 ± 12 | ~3702 |
+| 3.15.4 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 417 / 423 / 160 | +91 ± 13 | ~3742 |
+| 3.15.4 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 374 / 388 / 238 | +48 ± 12 | ~3699 |
+| 3.15.4 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 341 / 466 / 193 | +52 ± 12 | ~3696 |
+| 3.15.4 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 463 / 447 / 90 | +136 ± 12 | ~3758 |
+| 3.15.4 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 556 / 342 / 102 | +170 ± 15 | ~3761 |
+| **Average** | | | | | | | **~3685** |
 
 Single thread for both engines, games played in colour-swapped opening pairs from the
 UHO 2024 book on an AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%,
-from W / D / L.
+from the results of the opening pairs.
 
 The opponents are picked to sit above and below Anvil, because these unbalanced openings
 stretch Elo differences compared with CCRL: strong opponents give low estimates, weak ones
@@ -93,7 +93,8 @@ Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On th
 3.15.0 measured ~3645, though head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at
 5+0.05). 3.15.1 searches the same tree 18-28% faster and beats 3.15.0 by +44 ± 16 at 10+0.1.
 3.15.2 has search changes only and beats 3.15.1 by +11.7 ± 7.7 at 5+0.05. 3.15.3 also has
-search changes only and beats 3.15.2 by +14.6 ± 8.8 at 10+0.1.
+search changes only and beats 3.15.2 by +14.6 ± 8.8 at 10+0.1. 3.15.4 is 3.15.3 made faster
+and beats it by +15.6 ± 9.2 at 10+0.1; on this field it gains 23 Elo over 3.15.1 (~3662).
 
 ## Downloads
 
