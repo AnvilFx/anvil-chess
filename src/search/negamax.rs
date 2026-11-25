@@ -368,7 +368,7 @@ pub(super) fn negamax(
     let in_check = stm_in_check(board, ctx);
     let p = ctx.params;
     let cached = ctx.child_eval.filter(|c| c.0 == hash).map(|c| c.1);
-    let raw_eval = if in_check { None } else { Some(tt_eval.or(cached).unwrap_or_else(|| ctx.accs.evaluate(board))) };
+    let raw_eval = if in_check { None } else { Some(tt_eval.or(cached).unwrap_or_else(|| ctx.cached_raw_eval(board))) };
     let static_eval = raw_eval.map(|ev| ctx.corrected_eval(board, ev));
     let eval = static_eval.map(|ev| adjust_eval(ev, tt_score, tt_bound));
     ctx.evals[ply_us] = static_eval;
@@ -389,6 +389,8 @@ pub(super) fn negamax(
         && alpha.abs() < MATE_THRESHOLD
         && eval.unwrap() + p.razor_margin * depth as i32 <= alpha
     {
+        // qsearch would evaluate this same position again.
+        ctx.child_eval = Some((hash, raw_eval.unwrap()));
         let score = qsearch(board, alpha, alpha + 1, ply, ctx, tt);
         if ctx.stop {
             return alpha;
@@ -425,6 +427,7 @@ pub(super) fn negamax(
             let r = p.nmp_base_r as u32 + (depth / p.nmp_divisor as u32);
             let undo = board.make_null_move();
             tt.prefetch(board.hash);
+            ctx.prefetch_eval(board.hash);
             ctx.accs.push_null();
             if ply_us + 1 < MAX_PLY {
                 ctx.played[ply_us + 1] = None;
@@ -596,6 +599,10 @@ pub(super) fn negamax(
                 if ts.abs() < MATE_THRESHOLD {
                     let singular_beta = ts - p.singular_margin * depth as i32;
                     let reduced = (depth - 1) / 2;
+                    // The excluded search skips the TT, so it would evaluate this position again.
+                    if let Some(raw) = raw_eval {
+                        ctx.child_eval = Some((hash, raw));
+                    }
                     let value = negamax(
                         board,
                         reduced,
@@ -629,6 +636,7 @@ pub(super) fn negamax(
 
         let undo = board.make_move(m);
         tt.prefetch(board.hash);
+        ctx.prefetch_eval(board.hash);
         if ply_us + 1 < MAX_PLY {
             ctx.played[ply_us + 1] = Some(move_key);
         }
@@ -668,7 +676,7 @@ pub(super) fn negamax(
                 r += p.lmr_tt_capture * tt_move.is_some_and(|t| t.is_capture()) as i32;
                 // Static eval after the move, from our side: a rise earns depth back, a clear drop costs more.
                 if let (Some(se), false) = (static_eval, gives_check) {
-                    let raw = tt.probe(board.hash).and_then(|e| e.eval()).unwrap_or_else(|| ctx.accs.evaluate(board));
+                    let raw = tt.probe(board.hash).and_then(|e| e.eval()).unwrap_or_else(|| ctx.cached_raw_eval(board));
                     ctx.child_eval = Some((board.hash, raw));
                     let after = -ctx.corrected_eval(board, raw);
                     let delta = after - se;
@@ -811,7 +819,8 @@ pub(super) fn qsearch(board: &mut Board, mut alpha: i32, beta: i32, ply: u32, ct
     let mut best_score = -INF;
     let mut raw_eval: Option<i32> = None;
     if !in_check {
-        let raw = tt_eval.unwrap_or_else(|| ctx.accs.evaluate(board));
+        let cached = ctx.child_eval.filter(|c| c.0 == hash).map(|c| c.1);
+        let raw = tt_eval.or(cached).unwrap_or_else(|| ctx.accs.evaluate(board));
         raw_eval = Some(raw);
         let stand_pat = adjust_eval(ctx.corrected_eval(board, raw), tt_score, tt_bound);
         best_score = stand_pat;

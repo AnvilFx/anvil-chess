@@ -132,38 +132,109 @@ fn pairwise_scalar(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: &mut [u8; 
     }
 }
 
-// mulhi(a << 7, b) is exactly (a * b) >> 9; packus interleaves 128-bit lanes, the permute undoes it.
-// Writes all N_HIDDEN bytes of `act`, lists the 4-byte groups with any nonzero byte into `nz`
-// (N_HIDDEN / 4 slots; the index stores never pass the end) and returns their count.
+// Byte order of the pairwise output. packus interleaves its two inputs per 128-bit lane, 8 bytes
+// at a time; instead of permuting that back, the L1 weight groups are stored in the same order
+// (the integer L1 sums don't depend on it).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum ActLayout {
+    Natural,
+    // pairwise_avx2: 8-byte pieces reordered within each 32 bytes.
+    Avx2,
+    // pairwise_avx512: within each 64 bytes.
+    Avx512,
+}
+
+// The layout dense_eval's pairwise kernel writes on this CPU.
+pub(crate) fn act_layout() -> ActLayout {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if std::is_x86_feature_detected!("avx2") {
+            return if !no_avx512() && std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vbmi2") {
+                ActLayout::Avx512
+            } else {
+                ActLayout::Avx2
+            };
+        }
+    }
+    ActLayout::Natural
+}
+
+// The natural (pairwise_scalar) index of the 4-byte group stored at position `g` in `layout`.
+pub(crate) fn natural_group(layout: ActLayout, g: usize) -> usize {
+    let qwords = match layout {
+        ActLayout::Natural => return g,
+        ActLayout::Avx2 => 4,
+        ActLayout::Avx512 => 8,
+    };
+    // Each 128-bit lane L of packus(x, y) holds the 8 bytes of x from lane L, then those of y.
+    let (q, half) = (g / 2, g % 2);
+    let (block, qi) = (q / qwords, q % qwords);
+    let nat = (qi % 2) * (qwords / 2) + qi / 2;
+    (block * qwords + nat) * 2 + half
+}
+
+// mulhi(a << 7, b) is exactly (a * b) >> 9. Output in ActLayout::Avx2 order.
+// `b` only needs the upper clamp: a negative b makes the product <= 0 and packus saturates it to 0.
+// Writes all N_HIDDEN bytes of `act` and returns a bit per 4-byte group (bit g % 64 of word g / 64)
+// that is set when the group has any nonzero byte. A mask the L1 walks costs less than building an
+// index list from a lookup table.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn pairwise_avx2(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mut u8, nz: *mut u16) -> usize {
+unsafe fn pairwise_avx2(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mut u8) -> [u64; N_HIDDEN / 256] {
     use std::arch::x86_64::*;
     let zero = _mm256_setzero_si256();
     let max = _mm256_set1_epi16(QA as i16);
-    let mut n = 0;
+    let mut bits = [0u64; N_HIDDEN / 256];
     for (side, src) in [us, them].into_iter().enumerate() {
         let p = src.as_ptr();
         let pair = |off: usize| {
             let a = _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256(p.add(off) as *const __m256i), zero), max);
-            let b = _mm256_min_epi16(_mm256_max_epi16(_mm256_loadu_si256(p.add(H + off) as *const __m256i), zero), max);
+            let b = _mm256_min_epi16(_mm256_loadu_si256(p.add(H + off) as *const __m256i), max);
             _mm256_mulhi_epi16(_mm256_slli_epi16(a, 7), b)
         };
-        for c in 0..H / 32 {
-            let packed = _mm256_packus_epi16(pair(c * 32), pair(c * 32 + 16));
-            let v = _mm256_permute4x64_epi64(packed, 0b11_01_10_00);
-            let at = side * H + c * 32;
-            _mm256_storeu_si256(act.add(at) as *mut __m256i, v);
-            let m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(v, zero))) as usize;
-            let idx = _mm_loadu_si128(MASK_INDICES[m].as_ptr() as *const __m128i);
-            _mm_storeu_si128(nz.add(n) as *mut __m128i, _mm_add_epi16(idx, _mm_set1_epi16((at / 4) as i16)));
-            n += m.count_ones() as usize;
+        // 8 chunks of 32 bytes (8 groups each) fill one mask word.
+        for w in 0..H / 256 {
+            let mut word = 0u64;
+            for k in 0..8 {
+                let c = w * 8 + k;
+                let v = _mm256_packus_epi16(pair(c * 32), pair(c * 32 + 16));
+                _mm256_storeu_si256(act.add(side * H + c * 32) as *mut __m256i, v);
+                let m = _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_cmpgt_epi32(v, zero))) as u32 as u64;
+                word |= m << (8 * k);
+            }
+            bits[side * (H / 256) + w] = word;
+        }
+    }
+    bits
+}
+
+// The set bits of `bits` as an ascending index list (for the zmm L1 after pairwise_avx2, i.e. AVX-512
+// VNNI without VBMI2). Returns the count.
+#[cfg(target_arch = "x86_64")]
+unsafe fn bits_to_list(bits: &[u64; N_HIDDEN / 256], nz: *mut u16) -> usize {
+    let mut n = 0;
+    for (k, &word) in bits.iter().enumerate() {
+        let mut m = word;
+        while m != 0 {
+            *nz.add(n) = (k * 64 + m.trailing_zeros() as usize) as u16;
+            m &= m - 1;
+            n += 1;
         }
     }
     n
 }
 
-// pairwise_avx2 in 512-bit steps. `b` only needs the upper clamp: a negative b makes the product
+// The groups in an index list as a mask (for the AVX2 L1 after pairwise_avx512 without AVX-512 VNNI).
+#[cfg(target_arch = "x86_64")]
+fn list_to_bits(nz: &[u16]) -> [u64; N_HIDDEN / 256] {
+    let mut bits = [0u64; N_HIDDEN / 256];
+    for &g in nz {
+        bits[g as usize / 64] |= 1 << (g % 64);
+    }
+    bits
+}
+
+// pairwise_avx2 in 512-bit steps, output in ActLayout::Avx512 order. `b` only needs the upper clamp: a negative b makes the product
 // <= 0 and packus saturates it to 0. The nonzero groups of 128 bytes are compressed out of an
 // index vector in one go.
 #[cfg(target_arch = "x86_64")]
@@ -172,7 +243,6 @@ unsafe fn pairwise_avx512(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mu
     use std::arch::x86_64::*;
     let zero = _mm512_setzero_si512();
     let max = _mm512_set1_epi16(QA as i16);
-    let perm = _mm512_setr_epi64(0, 2, 4, 6, 1, 3, 5, 7);
     let mut ids = _mm512_set_epi16(
         31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
     );
@@ -187,8 +257,8 @@ unsafe fn pairwise_avx512(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mu
         };
         for c in 0..H / 128 {
             let o = c * 128;
-            let v0 = _mm512_permutexvar_epi64(perm, _mm512_packus_epi16(pair(o), pair(o + 32)));
-            let v1 = _mm512_permutexvar_epi64(perm, _mm512_packus_epi16(pair(o + 64), pair(o + 96)));
+            let v0 = _mm512_packus_epi16(pair(o), pair(o + 32));
+            let v1 = _mm512_packus_epi16(pair(o + 64), pair(o + 96));
             let at = side * H + o;
             _mm512_storeu_si512(act.add(at) as *mut _, v0);
             _mm512_storeu_si512(act.add(at + 64) as *mut _, v1);
@@ -201,57 +271,29 @@ unsafe fn pairwise_avx512(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], act: *mu
     n
 }
 
-// Set-bit positions of every 8-bit mask, so a mask's indices are written in one store.
-static MASK_INDICES: [[u16; 8]; 256] = {
-    let mut t = [[0u16; 8]; 256];
-    let mut m = 0;
-    while m < 256 {
-        let (mut bit, mut n) = (0, 0);
-        while bit < 8 {
-            if m & (1 << bit) != 0 {
-                t[m][n] = bit as u16;
-                n += 1;
-            }
-            bit += 1;
-        }
-        m += 1;
-    }
-    t
-};
-
-// Sparse L1 over the nonzero groups: each group's 4 bytes broadcast against its 16 x 4 weights.
+// Sparse L1 over the nonzero groups in `bits`: each group's 4 bytes broadcast against its 16 x 4
+// weights. One group per step: only the final add is loop-carried.
 macro_rules! l1_sparse {
     ($name:ident, $features:literal, $dot:expr) => {
         #[cfg(target_arch = "x86_64")]
         #[target_feature(enable = $features)]
-        unsafe fn $name(act: &[u8; N_HIDDEN], nz: &[u16], w: &L1Weights) -> [i32; L1] {
+        unsafe fn $name(act: &[u8; N_HIDDEN], bits: &[u64; N_HIDDEN / 256], w: &L1Weights) -> [i32; L1] {
             use std::arch::x86_64::*;
-            let n = nz.len();
-            let groups = act.as_ptr() as *const i32;
             let z = _mm256_setzero_si256();
-            // Two groups per step into separate accumulators, to halve the dependency chains.
-            let (mut a0, mut a1, mut b0, mut b1) = (z, z, z, z);
-            let mut i = 0;
-            while i + 1 < n {
-                let (g, h) = (nz[i] as usize, nz[i + 1] as usize);
-                let x = _mm256_set1_epi32(groups.add(g).read_unaligned());
-                let y = _mm256_set1_epi32(groups.add(h).read_unaligned());
-                let wg = w[g].as_ptr() as *const __m256i;
-                let wh = w[h].as_ptr() as *const __m256i;
-                a0 = $dot(a0, x, _mm256_loadu_si256(wg));
-                a1 = $dot(a1, x, _mm256_loadu_si256(wg.add(1)));
-                b0 = $dot(b0, y, _mm256_loadu_si256(wh));
-                b1 = $dot(b1, y, _mm256_loadu_si256(wh.add(1)));
-                i += 2;
+            let (mut a0, mut a1) = (z, z);
+            for (k, &word) in bits.iter().enumerate() {
+                let groups = (act.as_ptr() as *const i32).add(k * 64);
+                let wk = w.as_ptr().add(k * 64);
+                let mut m = word;
+                while m != 0 {
+                    let g = m.trailing_zeros() as usize;
+                    m &= m - 1;
+                    let x = _mm256_set1_epi32(groups.add(g).read_unaligned());
+                    let wg = (*wk.add(g)).as_ptr() as *const __m256i;
+                    a0 = $dot(a0, x, _mm256_loadu_si256(wg));
+                    a1 = $dot(a1, x, _mm256_loadu_si256(wg.add(1)));
+                }
             }
-            if i < n {
-                let g = nz[i] as usize;
-                let x = _mm256_set1_epi32(groups.add(g).read_unaligned());
-                let wg = w[g].as_ptr() as *const __m256i;
-                a0 = $dot(a0, x, _mm256_loadu_si256(wg));
-                a1 = $dot(a1, x, _mm256_loadu_si256(wg.add(1)));
-            }
-            let (a0, a1) = (_mm256_add_epi32(a0, b0), _mm256_add_epi32(a1, b1));
             let mut out = [0i32; L1];
             _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, a0);
             _mm256_storeu_si256(out.as_mut_ptr().add(8) as *mut __m256i, a1);
@@ -313,6 +355,14 @@ fn l1_scalar(act: &[u8; N_HIDDEN], w: &L1Weights) -> [i32; L1] {
     out
 }
 
+// Speed round 2026-11-24: ANVIL_NO_AVX512=1 makes the dense eval take its AVX2 path even on an AVX-512 CPU, so the
+// AVX2 code can be timed on the server. Read once.
+#[cfg(target_arch = "x86_64")]
+fn no_avx512() -> bool {
+    static F: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *F.get_or_init(|| std::env::var_os("ANVIL_NO_AVX512").is_some())
+}
+
 // Pairwise CReLU of each side's accumulator halves -> L1 -> SCReLU -> L2 -> SCReLU -> output.
 fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i32 {
     let d = &WEIGHTS.dense[0];
@@ -328,22 +378,31 @@ fn dense_eval(us: &[i16; N_HIDDEN], them: &[i16; N_HIDDEN], bucket: usize) -> i3
                 let mut act = MaybeUninit::<Act>::uninit();
                 let mut nz = MaybeUninit::<[u16; N_HIDDEN / 4 + 8]>::uninit();
                 let (ap, np) = (act.as_mut_ptr() as *mut u8, nz.as_mut_ptr() as *mut u16);
-                let n = if std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vbmi2") {
-                    pairwise_avx512(us, them, ap, np)
-                } else {
-                    pairwise_avx2(us, them, ap, np)
-                };
-                // The zmm L1 reads up to 4 slots past the list; keep them initialised.
-                (np.add(n) as *mut u64).write_unaligned(0);
-                let act = &act.assume_init_ref().0;
-                s = if std::is_x86_feature_detected!("avx512vnni") && std::is_x86_feature_detected!("avx512f") {
-                    l1_avx512vnni(act, np, n, l1w)
-                } else {
-                    let nz = std::slice::from_raw_parts(np as *const u16, n);
-                    if std::is_x86_feature_detected!("avxvnni") {
-                        l1_avxvnni(act, nz, l1w)
+                // pairwise_avx512 lists the nonzero groups, pairwise_avx2 returns them as a mask; the zmm
+                // L1 takes a list, the ymm L1 kernels a mask.
+                let zmm_l1 = !no_avx512() && std::is_x86_feature_detected!("avx512vnni") && std::is_x86_feature_detected!("avx512f");
+                s = if !no_avx512() && std::is_x86_feature_detected!("avx512bw") && std::is_x86_feature_detected!("avx512vbmi2") {
+                    let n = pairwise_avx512(us, them, ap, np);
+                    let act = &act.assume_init_ref().0;
+                    if zmm_l1 {
+                        // The zmm L1 reads up to 4 slots past the list; keep them initialised.
+                        (np.add(n) as *mut u64).write_unaligned(0);
+                        l1_avx512vnni(act, np, n, l1w)
                     } else {
-                        l1_avx2(act, nz, l1w)
+                        let bits = list_to_bits(std::slice::from_raw_parts(np, n));
+                        if std::is_x86_feature_detected!("avxvnni") { l1_avxvnni(act, &bits, l1w) } else { l1_avx2(act, &bits, l1w) }
+                    }
+                } else {
+                    let bits = pairwise_avx2(us, them, ap);
+                    let act = &act.assume_init_ref().0;
+                    if zmm_l1 {
+                        let n = bits_to_list(&bits, np);
+                        (np.add(n) as *mut u64).write_unaligned(0);
+                        l1_avx512vnni(act, np, n, l1w)
+                    } else if std::is_x86_feature_detected!("avxvnni") {
+                        l1_avxvnni(act, &bits, l1w)
+                    } else {
+                        l1_avx2(act, &bits, l1w)
                     }
                 };
             }
@@ -772,36 +831,55 @@ mod tests {
             let mut want = [0u8; N_HIDDEN];
             pairwise_scalar(&us, &them, &mut want);
             let l1_want = l1_scalar(&want, &w);
+            // `want` and `w` reordered into a kernel's layout, and that layout's nonzero groups.
+            let reorder = |layout: ActLayout| {
+                let mut act = [0u8; N_HIDDEN];
+                let mut lw: Box<L1Weights> = w.clone();
+                for g in 0..N_HIDDEN / 4 {
+                    let n = natural_group(layout, g);
+                    act[g * 4..g * 4 + 4].copy_from_slice(&want[n * 4..n * 4 + 4]);
+                    lw[g] = w[n];
+                }
+                let nz: Vec<u16> = (0..N_HIDDEN / 4).filter(|&g| act[g * 4..g * 4 + 4] != [0; 4]).map(|g| g as u16).collect();
+                (act, lw, nz)
+            };
+            let (nat_act, nat_w, _) = reorder(ActLayout::Natural);
+            assert_eq!(nat_act, want);
+            assert_eq!(l1_scalar(&nat_act, &nat_w), l1_want);
             #[cfg(target_arch = "x86_64")]
             unsafe {
                 use std::is_x86_feature_detected as has;
                 if !has!("avx2") {
                     continue;
                 }
+                let (act2, w2, nz_want) = reorder(ActLayout::Avx2);
+                assert_eq!(l1_scalar(&act2, &w2), l1_want);
                 let mut got = [0u8; N_HIDDEN];
+                let bits = pairwise_avx2(&us, &them, got.as_mut_ptr());
+                assert_eq!(got, act2);
                 let mut nz = [0u16; N_HIDDEN / 4];
-                let n = pairwise_avx2(&us, &them, got.as_mut_ptr(), nz.as_mut_ptr());
-                assert_eq!(got, want);
-                let nz_want: Vec<u16> = (0..N_HIDDEN / 4).filter(|&g| want[g * 4..g * 4 + 4] != [0; 4]).map(|g| g as u16).collect();
+                let n = bits_to_list(&bits, nz.as_mut_ptr());
                 assert_eq!(&nz[..n], &nz_want[..]);
+                assert_eq!(list_to_bits(&nz_want), bits);
                 if has!("avx512bw") && has!("avx512vbmi2") {
+                    let (act5, w5, nz_want5) = reorder(ActLayout::Avx512);
+                    assert_eq!(l1_scalar(&act5, &w5), l1_want);
                     let (mut got, mut nz) = ([0u8; N_HIDDEN], [0u16; N_HIDDEN / 4]);
                     let n = pairwise_avx512(&us, &them, got.as_mut_ptr(), nz.as_mut_ptr());
-                    assert_eq!(got, want);
-                    assert_eq!(&nz[..n], &nz_want[..]);
+                    assert_eq!(got, act5);
+                    assert_eq!(&nz[..n], &nz_want5[..]);
                 }
                 if has!("avx512vnni") && has!("avx512f") {
                     let mut nz8 = [0u16; N_HIDDEN / 4 + 8];
                     nz8[..n].copy_from_slice(&nz[..n]);
-                    assert_eq!(l1_avx512vnni(&want, nz8.as_ptr(), n, &w), l1_want);
+                    assert_eq!(l1_avx512vnni(&act2, nz8.as_ptr(), n, &w2), l1_want);
                     // Junk past the list must not leak into the masked last step.
                     nz8[n..].fill(0xFFFF);
-                    assert_eq!(l1_avx512vnni(&want, nz8.as_ptr(), n, &w), l1_want);
+                    assert_eq!(l1_avx512vnni(&act2, nz8.as_ptr(), n, &w2), l1_want);
                 }
-                let nz = &nz[..n];
-                assert_eq!(l1_avx2(&want, nz, &w), l1_want);
+                assert_eq!(l1_avx2(&act2, &bits, &w2), l1_want);
                 if has!("avxvnni") {
-                    assert_eq!(l1_avxvnni(&want, nz, &w), l1_want);
+                    assert_eq!(l1_avxvnni(&act2, &bits, &w2), l1_want);
                 }
             }
         }

@@ -1,6 +1,10 @@
 // Per-search state: limits, PV, killers, histories and corrections.
 use super::*;
 
+/// Eval cache size in entries, log2. Must be at least 17 (see `eval_cache`).
+const EVAL_CACHE_BITS: u32 = 18;
+const _: () = assert!(EVAL_CACHE_BITS >= 17);
+
 pub(super) struct SearchCtx {
     pub(super) deadline: Option<Instant>,
     pub(super) accs: AccStack,
@@ -33,6 +37,11 @@ pub(super) struct SearchCtx {
     pub(super) child_eval: Option<(u64, i32)>,
     /// Whether that child is in check, keyed the same way.
     pub(super) child_check: Option<(u64, bool)>,
+    /// Raw evals by hash, so positions that left no eval in the TT (an early return stores none)
+    /// skip the network when they come up again. An entry is (hash >> 16) << 16 | eval as u16 at
+    /// index hash's low EVAL_CACHE_BITS bits, so index and entry together match all 64 hash bits.
+    /// Bit 16 of the hash is in both: empty entries get it opposite to their index, so they never match.
+    pub(super) eval_cache: Box<[u64]>,
     /// How far search results have strayed from the raw eval, per side to move and pawn structure.
     pub(super) corr: Box<[[i16; CORR_SIZE]; 2]>,
     /// Hashes from game start to the parent of the current node.
@@ -67,6 +76,7 @@ impl SearchCtx {
             evals: [None; MAX_PLY],
             child_eval: None,
             child_check: None,
+            eval_cache: (0..1u64 << EVAL_CACHE_BITS).map(|i| (!i >> 16 & 1) << 16).collect(),
             corr: Box::new([[0; CORR_SIZE]; 2]),
             hashes: Vec::with_capacity(MAX_PLY + 64),
             root_idx: 0,
@@ -112,6 +122,35 @@ impl SearchCtx {
         *self.history_heur = [[[[[0; 64]; 64]; 3]; 2]; 2];
         self.cont.clear();
         self.corr.iter_mut().for_each(|t| t.fill(0));
+    }
+
+    /// The network's raw eval of `board`, from the eval cache when it holds this position.
+    #[inline]
+    pub(super) fn cached_raw_eval(&mut self, board: &Board) -> i32 {
+        let hash = board.hash;
+        let idx = hash as usize & ((1 << EVAL_CACHE_BITS) - 1);
+        let e = self.eval_cache[idx];
+        if e >> 16 == hash >> 16 {
+            return e as u16 as i16 as i32;
+        }
+        let v = self.accs.evaluate(board);
+        if let Ok(v16) = i16::try_from(v) {
+            self.eval_cache[idx] = (hash >> 16) << 16 | v16 as u16 as u64;
+        }
+        v
+    }
+
+    #[inline]
+    pub(super) fn prefetch_eval(&self, hash: u64) {
+        #[cfg(target_arch = "x86_64")]
+        {
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            let p = &self.eval_cache[hash as usize & ((1 << EVAL_CACHE_BITS) - 1)] as *const u64 as *const i8;
+            // SAFETY: a prefetch of a valid address has no side effects.
+            unsafe { _mm_prefetch(p, _MM_HINT_T0) };
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        let _ = hash;
     }
 
     #[inline]

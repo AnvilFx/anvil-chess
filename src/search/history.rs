@@ -73,6 +73,28 @@ pub(super) fn attacks_of_set(mut set: u64, f: impl Fn(usize) -> u64) -> u64 {
     t
 }
 
+const NOT_FILE_A: u64 = !0x0101_0101_0101_0101;
+const NOT_FILE_H: u64 = !0x8080_8080_8080_8080;
+
+/// Union of PAWN_ATTACKS[color] over `pawns`, by shifts.
+#[inline]
+fn pawn_attacks_of_set(pawns: u64, color: usize) -> u64 {
+    let (west, east) = (pawns & NOT_FILE_A, pawns & NOT_FILE_H);
+    if color == Color::White.idx() {
+        (west << 7) | (east << 9)
+    } else {
+        (west >> 9) | (east >> 7)
+    }
+}
+
+/// Union of KNIGHT_ATTACKS over `knights`, by shifts.
+#[inline]
+fn knight_attacks_of_set(knights: u64) -> u64 {
+    let h1 = ((knights >> 1) & NOT_FILE_H) | ((knights << 1) & NOT_FILE_A);
+    let h2 = ((knights >> 2) & !0xC0C0_C0C0_C0C0_C0C0) | ((knights << 2) & !0x0303_0303_0303_0303);
+    (h1 << 16) | (h1 >> 16) | (h2 << 8) | (h2 >> 8)
+}
+
 /// Our pieces attacked by a lower-valued enemy piece: material the side to move must spend its tempo saving.
 pub(super) fn lesser_threats(board: &Board) -> u64 {
     let (us, them) = (board.side_to_move.idx(), board.side_to_move.opp().idx());
@@ -81,9 +103,9 @@ pub(super) fn lesser_threats(board: &Board) -> u64 {
     let bb = &board.piece_bb[them];
     let rq = ours[PieceKind::Rook.idx()] | ours[PieceKind::Queen.idx()];
     let minors_up = ours[PieceKind::Knight.idx()] | ours[PieceKind::Bishop.idx()] | rq;
-    let mut t = attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[them][s]) & minors_up;
+    let mut t = pawn_attacks_of_set(bb[PieceKind::Pawn.idx()], them) & minors_up;
     if rq != 0 {
-        t |= (attacks_of_set(bb[PieceKind::Knight.idx()], |s| KNIGHT_ATTACKS[s])
+        t |= (knight_attacks_of_set(bb[PieceKind::Knight.idx()])
             | attacks_of_set(bb[PieceKind::Bishop.idx()], |s| bishop_attacks(Square(s as u8), occ)))
             & rq;
         t |= attacks_of_set(bb[PieceKind::Rook.idx()], |s| rook_attacks(Square(s as u8), occ)) & ours[PieceKind::Queen.idx()];
@@ -97,8 +119,8 @@ pub(super) fn threat_map(board: &Board) -> u64 {
     let occ = board.occupancy;
     let bb = &board.piece_bb[them];
     let queens = bb[PieceKind::Queen.idx()];
-    attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[them][s])
-        | attacks_of_set(bb[PieceKind::Knight.idx()], |s| KNIGHT_ATTACKS[s])
+    pawn_attacks_of_set(bb[PieceKind::Pawn.idx()], them)
+        | knight_attacks_of_set(bb[PieceKind::Knight.idx()])
         | attacks_of_set(bb[PieceKind::Bishop.idx()] | queens, |s| bishop_attacks(Square(s as u8), occ))
         | attacks_of_set(bb[PieceKind::Rook.idx()] | queens, |s| rook_attacks(Square(s as u8), occ))
         | attacks_of_set(bb[PieceKind::King.idx()], |s| KING_ATTACKS[s])
@@ -109,7 +131,7 @@ pub(super) fn defence_maps(board: &Board) -> (u64, u64) {
     let us = board.side_to_move.idx();
     let occ = board.occupancy;
     let bb = &board.piece_bb[us];
-    let pawns = attacks_of_set(bb[PieceKind::Pawn.idx()], |s| PAWN_ATTACKS[us][s]);
+    let pawns = pawn_attacks_of_set(bb[PieceKind::Pawn.idx()], us);
     let (mut once, mut twice) = (pawns, 0u64);
     let mut add = |a: u64| {
         twice |= once & a;
@@ -213,3 +235,115 @@ impl HistRows {
     }
 }
 
+
+/// `get + check_bonus` for eight moves at once (AVX2 gathers), exactly as the scalar code computes them.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+impl HistRows {
+    /// `m`: eight moves zero-extended into i32 lanes.
+    #[inline(always)]
+    pub(super) fn quiet_scores8(
+        &self,
+        ctx: &SearchCtx,
+        board: &Board,
+        m: std::arch::x86_64::__m256i,
+    ) -> std::arch::x86_64::__m256i {
+        use std::arch::x86_64::*;
+        // Bit `sq` (0..64 per lane) of the u64 split into lo/hi lanes; variable shifts of 32+ give 0.
+        #[inline(always)]
+        unsafe fn bit(lo: __m256i, hi: __m256i, sq: __m256i) -> __m256i {
+            let x = _mm256_or_si256(
+                _mm256_srlv_epi32(lo, sq),
+                _mm256_srlv_epi32(hi, _mm256_sub_epi32(sq, _mm256_set1_epi32(32))),
+            );
+            _mm256_and_si256(x, _mm256_set1_epi32(1))
+        }
+        // The i16 at each index (sign-extended), read as the aligned i32 pair holding it: callers
+        // guarantee idx | 1 is still inside the table.
+        #[inline(always)]
+        unsafe fn gather16(base: *const i16, idx: __m256i) -> __m256i {
+            let pair = _mm256_i32gather_epi32::<4>(base as *const i32, _mm256_srli_epi32::<1>(idx));
+            let even = _mm256_andnot_si256(idx, _mm256_set1_epi32(1));
+            _mm256_srai_epi32::<16>(_mm256_sllv_epi32(pair, _mm256_slli_epi32::<4>(even)))
+        }
+        let lo = |b: u64| b as u32 as i32;
+        let hi = |b: u64| (b >> 32) as u32 as i32;
+        // SAFETY: AVX2 is enabled at compile time; every gather stays inside its table (see each).
+        unsafe {
+            let c63 = _mm256_set1_epi32(63);
+            let from = _mm256_and_si256(m, c63);
+            let to = _mm256_and_si256(_mm256_srli_epi32::<6>(m), c63);
+            // Mailbox byte of `from`, from the aligned 4 bytes holding it (inside the 64-byte array).
+            let dw = _mm256_i32gather_epi32::<1>(
+                board.mailbox.as_ptr() as *const i32,
+                _mm256_andnot_si256(_mm256_set1_epi32(3), from),
+            );
+            let shift = _mm256_slli_epi32::<3>(_mm256_and_si256(from, _mm256_set1_epi32(3)));
+            let code = _mm256_and_si256(_mm256_srlv_epi32(dw, shift), _mm256_set1_epi32(15));
+            // mover_kind's table; the other bytes of each lane are 0 and look up KIND[0] = 0.
+            let kind_tab = _mm256_setr_epi8(
+                0, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2, 0, 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5, 0, 1, 2,
+            );
+            let kind = _mm256_shuffle_epi8(kind_tab, code);
+            let pawn = _mm256_cmpeq_epi32(kind, _mm256_setzero_si256());
+
+            let (t_lo, t_hi) = (_mm256_set1_epi32(lo(self.threats)), _mm256_set1_epi32(hi(self.threats)));
+            let tf = bit(t_lo, t_hi, from);
+            let ttt = bit(t_lo, t_hi, to);
+            let (d0, d1) = self.defended;
+            let d_lo = _mm256_blendv_epi8(_mm256_set1_epi32(lo(d1)), _mm256_set1_epi32(lo(d0)), pawn);
+            let d_hi = _mm256_blendv_epi8(_mm256_set1_epi32(hi(d1)), _mm256_set1_epi32(hi(d0)), pawn);
+            let tt = _mm256_add_epi32(ttt, _mm256_and_si256(ttt, bit(d_lo, d_hi, to)));
+            let plane = _mm256_add_epi32(_mm256_add_epi32(tf, _mm256_slli_epi32::<1>(tf)), tt);
+            let bidx = _mm256_add_epi32(_mm256_slli_epi32::<6>(_mm256_add_epi32(_mm256_slli_epi32::<6>(plane), from)), to);
+            // One side's table is 2 * 3 * 64 * 64 entries (even); bidx is below that.
+            let h = gather16(ctx.history_heur[self.stm.idx()].as_ptr() as *const i16, bidx);
+
+            // cont_key: min(code - 1 saturating, 11) * 64 + to; rows + key stay inside the table (see get).
+            let pc = _mm256_min_epi32(
+                _mm256_max_epi32(_mm256_sub_epi32(code, _mm256_set1_epi32(1)), _mm256_setzero_si256()),
+                _mm256_set1_epi32(PIECE_NB as i32 - 1),
+            );
+            let k = _mm256_add_epi32(_mm256_slli_epi32::<6>(pc), to);
+            let d = ctx.cont.data.as_ptr();
+            let c0 = gather16(d, _mm256_add_epi32(_mm256_set1_epi32(self.cont[0] as i32), k));
+            let c1 = gather16(d, _mm256_add_epi32(_mm256_set1_epi32(self.cont[1] as i32), k));
+
+            // check_bonus: checks[kind] & !threats has the `to` bit.
+            let ck = |f: fn(u64) -> i32| {
+                let c = |i: usize| f(self.checks[i] & !self.threats);
+                _mm256_setr_epi32(c(0), c(1), c(2), c(3), c(4), c(5), 0, 0)
+            };
+            let (ck_lo, ck_hi) = (ck(|b| b as u32 as i32), ck(|b| (b >> 32) as u32 as i32));
+            let cb = bit(_mm256_permutevar8x32_epi32(ck_lo, kind), _mm256_permutevar8x32_epi32(ck_hi, kind), to);
+            let bonus = _mm256_and_si256(_mm256_sub_epi32(_mm256_setzero_si256(), cb), _mm256_set1_epi32(16_000));
+
+            _mm256_add_epi32(_mm256_add_epi32(h, c0), _mm256_add_epi32(c1, bonus))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shifted_attack_sets_match_tables() {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            let set = x & x.rotate_left(23);
+            for c in 0..2 {
+                assert_eq!(pawn_attacks_of_set(set, c), attacks_of_set(set, |s| PAWN_ATTACKS[c][s]));
+            }
+            assert_eq!(knight_attacks_of_set(set), attacks_of_set(set, |s| KNIGHT_ATTACKS[s]));
+        }
+        for s in 0..64 {
+            for c in 0..2 {
+                assert_eq!(pawn_attacks_of_set(1 << s, c), PAWN_ATTACKS[c][s]);
+            }
+            assert_eq!(knight_attacks_of_set(1 << s), KNIGHT_ATTACKS[s]);
+        }
+    }
+}

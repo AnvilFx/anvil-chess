@@ -166,6 +166,14 @@ fn decode_weights() -> NnueWeights {
                 }
             }
         }
+        // Store each bucket's groups in the order the pairwise kernel writes activations.
+        let layout = super::nnue::act_layout();
+        for bucket in d.l1w.iter_mut() {
+            let natural = *bucket;
+            for (g, group) in bucket.iter_mut().enumerate() {
+                *group = natural[super::nnue::natural_group(layout, g)];
+            }
+        }
         let mut f32s = RAW[cursor..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
         let mut fill = |dst: &mut dyn Iterator<Item = &mut f32>| {
             for v in dst {

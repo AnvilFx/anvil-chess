@@ -1,6 +1,4 @@
 use super::types::Square;
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-use std::sync::LazyLock;
 
 /// `bb` must be non-zero.
 #[inline]
@@ -111,6 +109,18 @@ pub const PAWN_ATTACKS: [[u64; 64]; 2] = {
     arr
 };
 
+/// Squares attacked by all pawns in `pawns` of `color` (0 = white, 1 = black) at once.
+#[inline(always)]
+pub const fn pawn_attacks_set(pawns: u64, color: usize) -> u64 {
+    const NOT_A: u64 = !0x0101_0101_0101_0101;
+    const NOT_H: u64 = !0x8080_8080_8080_8080;
+    if color == 0 {
+        ((pawns & NOT_A) << 7) | ((pawns & NOT_H) << 9)
+    } else {
+        ((pawns & NOT_A) >> 9) | ((pawns & NOT_H) >> 7)
+    }
+}
+
 const fn between_bb_calc(from: u8, to: u8) -> u64 {
     let af = (from % 8) as i8;
     let ar = (from / 8) as i8;
@@ -198,7 +208,7 @@ pub(crate) static LINE_BB: [[u64; 64]; 64] = {
     arr
 };
 
-#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
+#[cfg(test)]
 fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     let mut attacks = 0u64;
     let file0 = sq.file() as i8;
@@ -220,59 +230,73 @@ fn slider_attacks(sq: Square, occ: u64, directions: &[(i8, i8)]) -> u64 {
     attacks
 }
 
-#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
+#[cfg(test)]
 pub(crate) fn bishop_attacks_raycast(sq: Square, occ: u64) -> u64 {
     slider_attacks(sq, occ, &[(1, 1), (1, -1), (-1, 1), (-1, -1)])
 }
 
-#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
+#[cfg(test)]
 pub(crate) fn rook_attacks_raycast(sq: Square, occ: u64) -> u64 {
     slider_attacks(sq, occ, &[(0, 1), (0, -1), (1, 0), (-1, 0)])
 }
 
+const fn ray_attacks(sq: u8, occ: u64, rook: bool) -> u64 {
+    let f0 = (sq % 8) as i8;
+    let r0 = (sq / 8) as i8;
+    let dirs: [(i8, i8); 4] =
+        if rook { [(0, 1), (0, -1), (1, 0), (-1, 0)] } else { [(1, 1), (1, -1), (-1, 1), (-1, -1)] };
+    let mut attacks = 0u64;
+    let mut d = 0;
+    while d < 4 {
+        let (df, dr) = dirs[d];
+        let mut f = f0 + df;
+        let mut r = r0 + dr;
+        while f >= 0 && f < 8 && r >= 0 && r < 8 {
+            let bit = 1u64 << ((r as u8) * 8 + f as u8);
+            attacks |= bit;
+            if occ & bit != 0 {
+                break;
+            }
+            f += df;
+            r += dr;
+        }
+        d += 1;
+    }
+    attacks
+}
+
+/// Relevant blockers: the empty-board rays without the board edge they run into.
+const fn relevant_mask(sq: u8, rook: bool) -> u64 {
+    let (f, r) = (sq % 8, sq / 8);
+    let edges = if rook {
+        (if f != 0 { 0x0101_0101_0101_0101 } else { 0 })
+            | (if f != 7 { 0x8080_8080_8080_8080 } else { 0 })
+            | (if r != 0 { 0xFF } else { 0 })
+            | (if r != 7 { 0xFF00_0000_0000_0000 } else { 0 })
+    } else {
+        0xFF81_8181_8181_81FF
+    };
+    ray_attacks(sq, 0, rook) & !edges
+}
+
+const fn empty_rays(rook: bool) -> [u64; 64] {
+    let mut t = [0u64; 64];
+    let mut sq = 0;
+    while sq < 64 {
+        t[sq] = ray_attacks(sq as u8, 0, rook);
+        sq += 1;
+    }
+    t
+}
+
+/// Slider attacks on an empty board.
+pub(crate) static BISHOP_RAYS: [u64; 64] = empty_rays(false);
+pub(crate) static ROOK_RAYS: [u64; 64] = empty_rays(true);
+
 // BMI2 PEXT indexes the attack tables directly; they are built at compile time.
 #[cfg(all(target_feature = "bmi2", pext))]
 mod pext {
-    use super::Square;
-
-    const fn ray_attacks(sq: u8, occ: u64, rook: bool) -> u64 {
-        let f0 = (sq % 8) as i8;
-        let r0 = (sq / 8) as i8;
-        let dirs: [(i8, i8); 4] =
-            if rook { [(0, 1), (0, -1), (1, 0), (-1, 0)] } else { [(1, 1), (1, -1), (-1, 1), (-1, -1)] };
-        let mut attacks = 0u64;
-        let mut d = 0;
-        while d < 4 {
-            let (df, dr) = dirs[d];
-            let mut f = f0 + df;
-            let mut r = r0 + dr;
-            while f >= 0 && f < 8 && r >= 0 && r < 8 {
-                let bit = 1u64 << ((r as u8) * 8 + f as u8);
-                attacks |= bit;
-                if occ & bit != 0 {
-                    break;
-                }
-                f += df;
-                r += dr;
-            }
-            d += 1;
-        }
-        attacks
-    }
-
-    /// Relevant blockers: the empty-board rays without the board edge they run into.
-    const fn relevant_mask(sq: u8, rook: bool) -> u64 {
-        let (f, r) = (sq % 8, sq / 8);
-        let edges = if rook {
-            (if f != 0 { 0x0101_0101_0101_0101 } else { 0 })
-                | (if f != 7 { 0x8080_8080_8080_8080 } else { 0 })
-                | (if r != 0 { 0xFF } else { 0 })
-                | (if r != 7 { 0xFF00_0000_0000_0000 } else { 0 })
-        } else {
-            0xFF81_8181_8181_81FF
-        };
-        ray_attacks(sq, 0, rook) & !edges
-    }
+    use super::{ray_attacks, relevant_mask, Square};
 
     #[derive(Clone, Copy)]
     struct PextEntry {
@@ -342,110 +366,138 @@ mod pext {
 #[cfg(all(target_feature = "bmi2", pext))]
 pub use pext::{bishop_attacks, rook_attacks};
 
+// Magic bitboards for targets without fast PEXT. The magics were found offline (the xorshift
+// search the engine used to run at startup) and the tables are built at compile time, so a
+// lookup needs no lazy-init check and no pointer chase. A bad magic fails the build.
 #[cfg(not(all(target_feature = "bmi2", pext)))]
-#[inline(always)]
-pub fn bishop_attacks(sq: Square, occ: u64) -> u64 {
-    let mi = &*BISHOP_MAGIC;
-    let idx = sq.idx();
-    unsafe {
-        let entry = mi.entries.get_unchecked(idx);
-        let blockers = occ & entry.mask;
-        let table_idx = (blockers.wrapping_mul(entry.magic) >> entry.shift) as usize;
-        *mi.table.get_unchecked(entry.offset + table_idx)
+mod magic {
+    use super::{ray_attacks, relevant_mask, Square};
+
+    const BISHOP_MAGICS: [u64; 64] = [
+        0x1040904200882280, 0x0008500408404020, 0x1004410202042000, 0x8084040C80100084,
+        0x8001104000080400, 0x00C2082308000002, 0x4011048874402340, 0x00A08044100108C0,
+        0x2000C04222040100, 0x6110044404004A00, 0x0000040802004320, 0x0880080851010808,
+        0x8C00020210300900, 0x04C40A0802280680, 0x4400010430020980, 0x40008904008404A4,
+        0x0020004308021492, 0x00200202140420A0, 0x2010210800801010, 0x4004000241020000,
+        0x4204108202020002, 0x0002020420842000, 0x8202003900A22000, 0x0000400084008800,
+        0x42040400202084A0, 0x52029001A8900880, 0x9008080001060820, 0x00248080080200A2,
+        0x00C1010050104000, 0x00009A0024880400, 0x01421A0000411010, 0x0944048002262108,
+        0x080904C026A23800, 0x0044226800200100, 0x1000108210100400, 0x0042010041A40040,
+        0x00400808214A0020, 0x4008020C20041011, 0x2048020084042080, 0x048203B204A100C0,
+        0xA0010421200404A0, 0x0220480808184400, 0x4802010401088200, 0x001048420085A800,
+        0x0010943092000400, 0x0120020060400200, 0x6C08080B014A4410, 0x4230023200210048,
+        0x4025011090440001, 0x0014840401040000, 0x02600D8414090100, 0xA090E40042020000,
+        0x4120001002022808, 0x00800910213200C0, 0x0020081001304082, 0x0002080855104001,
+        0x04010423100A1000, 0x0002014046101100, 0x0014000100880400, 0x0000C00000C20880,
+        0x2800000C04208200, 0x8020008460040104, 0x0080508519340400, 0x0120080108362041,
+    ];
+    const ROOK_MAGICS: [u64; 64] = [
+        0x0180002950844000, 0x0280200040018030, 0x03001B0060004090, 0x1180080004100080,
+        0x0200048802002090, 0x0100010002080400, 0x0400240081100822, 0x0100010000304882,
+        0x4300800080400020, 0x0140401000200040, 0x0022002012008040, 0x2811800800100180,
+        0x1408808004000800, 0x6082800201800400, 0x0001000100020004, 0x200500078A104100,
+        0x0000828000400030, 0x0210004010402000, 0x2802020040201480, 0x0800808008001000,
+        0x6A01010010060800, 0x0000808004000200, 0x0804010100040200, 0x2000220000409114,
+        0x2020208080004010, 0x1202230300400080, 0x0010004101002000, 0x0008018180100008,
+        0xC008000880800400, 0x0802040080020080, 0x4044814400021008, 0x0004801C80044100,
+        0x0240008054800024, 0x0040201002400241, 0xD010120022004080, 0x2440100080800802,
+        0x0200040080800801, 0x0600800400800200, 0x8020821004002118, 0x0000801060800100,
+        0x0000208040008003, 0x0240002002838048, 0x0000200010008080, 0x0408100008008080,
+        0x1180080004008080, 0x0052000510820008, 0x0020C23008040011, 0x00003102418A0024,
+        0x0060800020410100, 0x2000200080400080, 0x4103412004150100, 0x0400080110008180,
+        0x0302040208008080, 0x0009810200040080, 0x0212000401088200, 0x0000012444048200,
+        0x000601A100144082, 0x0201042340008115, 0x8004102200800842, 0x0008081000042101,
+        0x2401001004020801, 0x2001000400020847, 0x3908081210408104, 0x0001008024010842,
+    ];
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MagicEntry {
+        mask: u64,
+        magic: u64,
+        offset: usize,
+        shift: u32,
+    }
+
+    const fn magic_entries(rook: bool) -> [MagicEntry; 64] {
+        let mut e = [MagicEntry { mask: 0, magic: 0, offset: 0, shift: 0 }; 64];
+        let mut off = 0;
+        let mut sq = 0;
+        while sq < 64 {
+            let mask = relevant_mask(sq as u8, rook);
+            let magic = if rook { ROOK_MAGICS[sq] } else { BISHOP_MAGICS[sq] };
+            e[sq] = MagicEntry { mask, magic, offset: off, shift: 64 - mask.count_ones() };
+            off += 1 << mask.count_ones();
+            sq += 1;
+        }
+        e
+    }
+
+    const ROOK_SIZE: usize = 102_400;
+    const BISHOP_SIZE: usize = 5_248;
+    static ROOK_ENTRIES: [MagicEntry; 64] = magic_entries(true);
+    static BISHOP_ENTRIES: [MagicEntry; 64] = magic_entries(false);
+
+    // Every subset of every mask goes to its magic index; two subsets with different attacks on one
+    // index would be a bad magic, which stops compilation. Attack sets are never empty, so 0 = unused.
+    const fn magic_table<const N: usize>(rook: bool) -> [u64; N] {
+        let entries = magic_entries(rook);
+        let mut t = [0u64; N];
+        let mut sq = 0;
+        while sq < 64 {
+            let e = entries[sq];
+            let mut sub = 0u64;
+            loop {
+                let a = ray_attacks(sq as u8, sub, rook);
+                let i = e.offset + (sub.wrapping_mul(e.magic) >> e.shift) as usize;
+                assert!(t[i] == 0 || t[i] == a, "bad magic");
+                t[i] = a;
+                sub = sub.wrapping_sub(e.mask) & e.mask;
+                if sub == 0 {
+                    break;
+                }
+            }
+            sq += 1;
+        }
+        t
+    }
+
+    static ROOK_TABLE: [u64; ROOK_SIZE] = magic_table(true);
+    static BISHOP_TABLE: [u64; BISHOP_SIZE] = magic_table(false);
+
+    #[inline(always)]
+    pub fn bishop_attacks(sq: Square, occ: u64) -> u64 {
+        // SAFETY: sq < 64, and offset + (masked occ * magic >> shift) < offset + 2^bits, inside the table.
+        unsafe {
+            let e = BISHOP_ENTRIES.get_unchecked(sq.idx());
+            *BISHOP_TABLE.get_unchecked(e.offset + ((occ & e.mask).wrapping_mul(e.magic) >> e.shift) as usize)
+        }
+    }
+
+    #[inline(always)]
+    pub fn rook_attacks(sq: Square, occ: u64) -> u64 {
+        // SAFETY: as in bishop_attacks.
+        unsafe {
+            let e = ROOK_ENTRIES.get_unchecked(sq.idx());
+            *ROOK_TABLE.get_unchecked(e.offset + ((occ & e.mask).wrapping_mul(e.magic) >> e.shift) as usize)
+        }
     }
 }
 
 #[cfg(not(all(target_feature = "bmi2", pext)))]
-#[inline(always)]
-pub fn rook_attacks(sq: Square, occ: u64) -> u64 {
-    let mi = &*ROOK_MAGIC;
-    let idx = sq.idx();
-    unsafe {
-        let entry = mi.entries.get_unchecked(idx);
-        let blockers = occ & entry.mask;
-        let table_idx = (blockers.wrapping_mul(entry.magic) >> entry.shift) as usize;
-        *mi.table.get_unchecked(entry.offset + table_idx)
-    }
-}
+pub use magic::{bishop_attacks, rook_attacks};
 
 #[inline]
 pub fn queen_attacks(sq: Square, occ: u64) -> u64 {
     bishop_attacks(sq, occ) | rook_attacks(sq, occ)
 }
 
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MagicEntry {
-    mask: u64,
-    magic: u64,
-    offset: usize,
-    shift: u32,
-}
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-struct MagicTable {
-    entries: [MagicEntry; 64],
-    table: Box<[u64]>,
-}
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-static BISHOP_MAGIC: LazyLock<MagicTable> = LazyLock::new(|| build_magic_table(true));
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-static ROOK_MAGIC: LazyLock<MagicTable> = LazyLock::new(|| build_magic_table(false));
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-fn bishop_mask(sq: u8) -> u64 {
-    let file = (sq % 8) as i8;
-    let rank = (sq / 8) as i8;
-    let mut mask = 0u64;
-    let dirs: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
-    for (df, dr) in dirs {
-        let mut f = file + df;
-        let mut r = rank + dr;
-        while f > 0 && f < 7 && r > 0 && r < 7 {
-            mask |= 1u64 << ((r as u8) * 8 + (f as u8));
-            f += df;
-            r += dr;
-        }
-    }
-    mask
-}
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-fn rook_mask(sq: u8) -> u64 {
-    let file = (sq % 8) as i8;
-    let rank = (sq / 8) as i8;
-    let mut mask = 0u64;
-    let mut r = rank + 1;
-    while r < 7 {
-        mask |= 1u64 << ((r as u8) * 8 + (file as u8));
-        r += 1;
-    }
-    let mut r = rank - 1;
-    while r > 0 {
-        mask |= 1u64 << ((r as u8) * 8 + (file as u8));
-        r -= 1;
-    }
-    let mut f = file + 1;
-    while f < 7 {
-        mask |= 1u64 << ((rank as u8) * 8 + (f as u8));
-        f += 1;
-    }
-    let mut f = file - 1;
-    while f > 0 {
-        mask |= 1u64 << ((rank as u8) * 8 + (f as u8));
-        f -= 1;
-    }
-    mask
-}
-
-#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
+#[cfg(test)]
 pub(crate) struct XorShift64 {
     state: u64,
 }
 
-#[cfg(any(test, not(all(target_feature = "bmi2", pext))))]
+#[cfg(test)]
 impl XorShift64 {
     pub(crate) fn new(seed: u64) -> Self {
         Self { state: if seed == 0 { 1 } else { seed } }
@@ -458,66 +510,4 @@ impl XorShift64 {
         self.state = x;
         x
     }
-}
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-fn find_magic_for_sq(sq: u8, mask: u64, is_bishop: bool, rng: &mut XorShift64) -> (u64, Vec<u64>) {
-    let bits = mask.count_ones();
-    let n_entries = 1usize << bits;
-    let shift = 64 - bits;
-
-    let mut subsets: Vec<(u64, u64)> = Vec::with_capacity(n_entries);
-    let mut sub = 0u64;
-    loop {
-        let attack =
-            if is_bishop { bishop_attacks_raycast(Square(sq), sub) } else { rook_attacks_raycast(Square(sq), sub) };
-        subsets.push((sub, attack));
-        // Carry-Rippler: next subset of `mask`.
-        sub = sub.wrapping_sub(mask) & mask;
-        if sub == 0 {
-            break;
-        }
-    }
-
-    loop {
-        let magic = rng.next() & rng.next() & rng.next();
-        if (mask.wrapping_mul(magic) >> 56).count_ones() < 6 {
-            continue;
-        }
-
-        let mut table = vec![0u64; n_entries];
-        let mut used = vec![false; n_entries];
-        let mut conflict = false;
-
-        for &(s, attack) in &subsets {
-            let idx = ((s.wrapping_mul(magic)) >> shift) as usize;
-            if used[idx] {
-                if table[idx] != attack {
-                    conflict = true;
-                    break;
-                }
-            } else {
-                table[idx] = attack;
-                used[idx] = true;
-            }
-        }
-
-        if !conflict {
-            return (magic, table);
-        }
-    }
-}
-
-#[cfg(not(all(target_feature = "bmi2", pext)))]
-fn build_magic_table(is_bishop: bool) -> MagicTable {
-    let mut entries = [MagicEntry { mask: 0, magic: 0, offset: 0, shift: 0 }; 64];
-    let mut table: Vec<u64> = Vec::new();
-    let mut rng = XorShift64::new(0x6F61D1735F2B3D1E);
-    for sq in 0..64u8 {
-        let mask = if is_bishop { bishop_mask(sq) } else { rook_mask(sq) };
-        let (magic, sub_table) = find_magic_for_sq(sq, mask, is_bishop, &mut rng);
-        entries[sq as usize] = MagicEntry { mask, magic, offset: table.len(), shift: 64 - mask.count_ones() };
-        table.extend(sub_table);
-    }
-    MagicTable { entries, table: table.into_boxed_slice() }
 }

@@ -140,10 +140,7 @@ impl Board {
 
         let occ_no_king = self.occupancy & !king_bb;
         let mut danger = 0u64;
-        let mut p = self.piece_bb[opp_idx][PieceKind::Pawn.idx()];
-        while let Some(sq) = pop_lsb(&mut p) {
-            danger |= PAWN_ATTACKS[opp_idx][sq.idx()];
-        }
+        danger |= pawn_attacks_set(self.piece_bb[opp_idx][PieceKind::Pawn.idx()], opp_idx);
         let mut n = self.piece_bb[opp_idx][PieceKind::Knight.idx()];
         while let Some(sq) = pop_lsb(&mut n) {
             danger |= KNIGHT_ATTACKS[sq.idx()];
@@ -194,7 +191,7 @@ impl Board {
         let mut pinned = 0u64;
         let bishop_q = self.piece_bb[opp_idx][PieceKind::Bishop.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
         let rook_q = self.piece_bb[opp_idx][PieceKind::Rook.idx()] | self.piece_bb[opp_idx][PieceKind::Queen.idx()];
-        let mut snipers = (bishop_q & bishop_attacks(king_sq, 0)) | (rook_q & rook_attacks(king_sq, 0));
+        let mut snipers = (bishop_q & BISHOP_RAYS[king_sq.idx()]) | (rook_q & ROOK_RAYS[king_sq.idx()]);
         while let Some(sniper_sq) = pop_lsb(&mut snipers) {
             let between = BETWEEN_BB[king_sq.idx()][sniper_sq.idx()] & self.occupancy;
             if between.count_ones() == 1 {
@@ -365,7 +362,16 @@ impl Board {
         let step: i8 = if stm == Color::White { 8 } else { -8 };
         let promo_rank: u8 = if stm == Color::White { 7 } else { 0 };
 
-        let mut p = pawns;
+        // Only pawns that can emit something: on the rank before promotion, or attacking an enemy
+        // piece or the en passant square. Skipping the others keeps the emission order.
+        let pre_promo: u64 = if stm == Color::White { 0x00FF_0000_0000_0000 } else { 0xFF00 };
+        // A pawn of ours attacks an enemy piece exactly when an enemy pawn there would attack it.
+        let attackers = pawn_attacks_set(opp_bb, stm.opp().idx());
+        let ep_attackers = match self.en_passant {
+            Some(ep_sq) => PAWN_ATTACKS[stm.opp().idx()][ep_sq.idx()],
+            None => 0,
+        };
+        let mut p = pawns & (pre_promo | attackers | ep_attackers);
         while let Some(from) = pop_lsb(&mut p) {
             let pin = info.pin_mask(from);
             let to_idx = from.0 as i8 + step;
@@ -436,19 +442,13 @@ impl Board {
     }
 }
 
-fn emit_captures(from: Square, mut caps: u64, out: &mut MoveList) {
-    while let Some(to) = pop_lsb(&mut caps) {
-        out.push(Move::new(from, to, Move::CAPTURE));
-    }
+#[inline(always)]
+fn emit_captures(from: Square, caps: u64, out: &mut MoveList) {
+    out.push_targets(from, caps, Move::CAPTURE);
 }
 
+#[inline(always)]
 fn emit_targets(from: Square, targets: u64, opp_bb: u64, out: &mut MoveList) {
-    let mut quiet = targets & !opp_bb;
-    while let Some(to) = pop_lsb(&mut quiet) {
-        out.push(Move::new(from, to, Move::QUIET));
-    }
-    let mut caps = targets & opp_bb;
-    while let Some(to) = pop_lsb(&mut caps) {
-        out.push(Move::new(from, to, Move::CAPTURE));
-    }
+    out.push_targets(from, targets & !opp_bb, Move::QUIET);
+    out.push_targets(from, targets & opp_bb, Move::CAPTURE);
 }

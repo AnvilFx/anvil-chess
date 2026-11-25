@@ -30,6 +30,18 @@ fn mb_decode(code: u8) -> Option<Piece> {
     MB_DECODE[(code & 15) as usize]
 }
 
+/// Castling rights kept by a move from or onto each square.
+static CASTLE_KEEP: [u8; 64] = {
+    let mut t = [0xFFu8; 64];
+    t[0] = !CastleRights::WHITE_QUEEN;
+    t[7] = !CastleRights::WHITE_KING;
+    t[4] = !(CastleRights::WHITE_KING | CastleRights::WHITE_QUEEN);
+    t[56] = !CastleRights::BLACK_QUEEN;
+    t[63] = !CastleRights::BLACK_KING;
+    t[60] = !(CastleRights::BLACK_KING | CastleRights::BLACK_QUEEN);
+    t
+};
+
 #[derive(Clone)]
 pub struct Board {
     pub piece_bb: [[u64; 6]; 2],
@@ -91,41 +103,33 @@ impl Board {
         mb_decode(self.mailbox[sq.idx()])
     }
 
-    #[inline]
-    fn add_piece(&mut self, sq: Square, color: Color, kind: PieceKind) {
+    /// Piece placement without the hash: make_move keeps the hash in a local, unmake restores it from UndoInfo.
+    #[inline(always)]
+    fn put_nohash(&mut self, sq: Square, color: Color, kind: PieceKind) {
         let bit = sq.bb();
-        let ci = color.idx();
-        let ki = kind.idx();
-        self.piece_bb[ci][ki] |= bit;
-        self.color_bb[ci] |= bit;
+        self.piece_bb[color.idx()][kind.idx()] |= bit;
+        self.color_bb[color.idx()] |= bit;
         self.occupancy |= bit;
         self.mailbox[sq.idx()] = mb_encode_ck(color, kind);
-        self.hash ^= zob_piece(color, kind, sq);
     }
 
-    #[inline]
-    fn remove_piece(&mut self, sq: Square, color: Color, kind: PieceKind) {
+    #[inline(always)]
+    fn take_nohash(&mut self, sq: Square, color: Color, kind: PieceKind) {
         let mask = !sq.bb();
-        let ci = color.idx();
-        let ki = kind.idx();
-        self.piece_bb[ci][ki] &= mask;
-        self.color_bb[ci] &= mask;
+        self.piece_bb[color.idx()][kind.idx()] &= mask;
+        self.color_bb[color.idx()] &= mask;
         self.occupancy &= mask;
         self.mailbox[sq.idx()] = MB_EMPTY;
-        self.hash ^= zob_piece(color, kind, sq);
     }
 
-    #[inline]
-    fn move_piece(&mut self, from: Square, to: Square, color: Color, kind: PieceKind) {
+    #[inline(always)]
+    fn shift_nohash(&mut self, from: Square, to: Square, color: Color, kind: PieceKind) {
         let xor = from.bb() | to.bb();
-        let ci = color.idx();
-        let ki = kind.idx();
-        self.piece_bb[ci][ki] ^= xor;
-        self.color_bb[ci] ^= xor;
+        self.piece_bb[color.idx()][kind.idx()] ^= xor;
+        self.color_bb[color.idx()] ^= xor;
         self.occupancy ^= xor;
         self.mailbox[from.idx()] = MB_EMPTY;
         self.mailbox[to.idx()] = mb_encode_ck(color, kind);
-        self.hash ^= zob_piece(color, kind, from) ^ zob_piece(color, kind, to);
     }
 
     pub fn set_square(&mut self, sq: Square, piece: Option<Piece>) {
@@ -406,8 +410,8 @@ impl Board {
             checkers: self.checkers,
         };
 
-        // Remove the old meta hash bits; the new ones are added at the end.
-        self.hash ^= zob_meta(self.side_to_move, self.castle, self.en_passant);
+        // The hash is built in a local and stored once. Remove the old meta bits; the new ones go in at the end.
+        let mut h = self.hash ^ zob_meta(self.side_to_move, self.castle, self.en_passant);
 
         self.en_passant = None;
 
@@ -418,14 +422,17 @@ impl Board {
         }
 
         if let Some(cap) = captured {
-            self.remove_piece(captured_sq, cap.color, cap.kind);
+            self.take_nohash(captured_sq, cap.color, cap.kind);
+            h ^= zob_piece(cap.color, cap.kind, captured_sq);
         }
 
         if let Some(promo) = m.promo_kind() {
-            self.remove_piece(from, stm, PieceKind::Pawn);
-            self.add_piece(to, stm, promo);
+            self.take_nohash(from, stm, PieceKind::Pawn);
+            self.put_nohash(to, stm, promo);
+            h ^= zob_piece(stm, PieceKind::Pawn, from) ^ zob_piece(stm, promo, to);
         } else {
-            self.move_piece(from, to, stm, moving_kind);
+            self.shift_nohash(from, to, stm, moving_kind);
+            h ^= zob_piece(stm, moving_kind, from) ^ zob_piece(stm, moving_kind, to);
         }
 
         if flag == Move::DOUBLE_PUSH {
@@ -444,54 +451,25 @@ impl Board {
                 Color::White => (Square(7), Square(5)),
                 Color::Black => (Square(63), Square(61)),
             };
-            self.move_piece(rf, rt, stm, PieceKind::Rook);
+            self.shift_nohash(rf, rt, stm, PieceKind::Rook);
+            h ^= zob_piece(stm, PieceKind::Rook, rf) ^ zob_piece(stm, PieceKind::Rook, rt);
         } else if flag == Move::CASTLE_QUEEN {
             let (rf, rt) = match stm {
                 Color::White => (Square(0), Square(3)),
                 Color::Black => (Square(56), Square(59)),
             };
-            self.move_piece(rf, rt, stm, PieceKind::Rook);
+            self.shift_nohash(rf, rt, stm, PieceKind::Rook);
+            h ^= zob_piece(stm, PieceKind::Rook, rf) ^ zob_piece(stm, PieceKind::Rook, rt);
         }
 
-        if moving_kind == PieceKind::King {
-            match stm {
-                Color::White => {
-                    self.castle.remove(CastleRights::WHITE_KING);
-                    self.castle.remove(CastleRights::WHITE_QUEEN);
-                }
-                Color::Black => {
-                    self.castle.remove(CastleRights::BLACK_KING);
-                    self.castle.remove(CastleRights::BLACK_QUEEN);
-                }
-            }
-        }
-        if moving_kind == PieceKind::Rook {
-            match from.0 {
-                0 => self.castle.remove(CastleRights::WHITE_QUEEN),
-                7 => self.castle.remove(CastleRights::WHITE_KING),
-                56 => self.castle.remove(CastleRights::BLACK_QUEEN),
-                63 => self.castle.remove(CastleRights::BLACK_KING),
-                _ => {}
-            }
-        }
-        if let Some(cap) = captured {
-            if cap.kind == PieceKind::Rook {
-                match captured_sq.0 {
-                    0 => self.castle.remove(CastleRights::WHITE_QUEEN),
-                    7 => self.castle.remove(CastleRights::WHITE_KING),
-                    56 => self.castle.remove(CastleRights::BLACK_QUEEN),
-                    63 => self.castle.remove(CastleRights::BLACK_KING),
-                    _ => {}
-                }
-            }
-        }
+        // A right stays only while its king and rook are on their home squares, so any move
+        // from or onto one of those squares clears the rights tied to it.
+        self.castle.0 &= CASTLE_KEEP[from.idx()] & CASTLE_KEEP[to.idx()];
 
-        if stm == Color::Black {
-            self.fullmove_number = self.fullmove_number.saturating_add(1);
-        }
+        self.fullmove_number = self.fullmove_number.saturating_add(stm as u16);
         self.side_to_move = stm.opp();
 
-        self.hash ^= zob_meta(self.side_to_move, self.castle, self.en_passant);
+        self.hash = h ^ zob_meta(self.side_to_move, self.castle, self.en_passant);
         self.checkers = self.compute_checkers();
 
         undo
@@ -506,9 +484,7 @@ impl Board {
         self.side_to_move = self.side_to_move.opp();
         let stm = self.side_to_move;
 
-        if stm == Color::Black {
-            self.fullmove_number = self.fullmove_number.saturating_sub(1);
-        }
+        self.fullmove_number = self.fullmove_number.saturating_sub(stm as u16);
 
         self.castle = undo.castle;
         self.en_passant = undo.en_passant;
@@ -519,21 +495,21 @@ impl Board {
                 Color::White => (Square(7), Square(5)),
                 Color::Black => (Square(63), Square(61)),
             };
-            self.move_piece(rt, rf, stm, PieceKind::Rook);
+            self.shift_nohash(rt, rf, stm, PieceKind::Rook);
         } else if flag == Move::CASTLE_QUEEN {
             let (rf, rt) = match stm {
                 Color::White => (Square(0), Square(3)),
                 Color::Black => (Square(56), Square(59)),
             };
-            self.move_piece(rt, rf, stm, PieceKind::Rook);
+            self.shift_nohash(rt, rf, stm, PieceKind::Rook);
         }
 
         if let Some(promo) = m.promo_kind() {
-            self.remove_piece(to, stm, promo);
-            self.add_piece(from, stm, PieceKind::Pawn);
+            self.take_nohash(to, stm, promo);
+            self.put_nohash(from, stm, PieceKind::Pawn);
         } else {
             let moving_kind = self.piece_at(to).expect("unmake: to-square is empty").kind;
-            self.move_piece(to, from, stm, moving_kind);
+            self.shift_nohash(to, from, stm, moving_kind);
         }
 
         if let Some(cap) = undo.captured {
@@ -545,7 +521,7 @@ impl Board {
             } else {
                 to
             };
-            self.add_piece(cap_sq, cap.color, cap.kind);
+            self.put_nohash(cap_sq, cap.color, cap.kind);
         }
 
         self.hash = undo.hash;

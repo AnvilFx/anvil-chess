@@ -226,6 +226,23 @@ impl MoveList {
         self.len += 1;
     }
 
+    /// Pushes a move from `from` to every square of `targets`, lowest square first, all with `flag`.
+    /// One capacity check for the whole set lets the loop keep the length in a register.
+    #[inline(always)]
+    pub fn push_targets(&mut self, from: Square, mut targets: u64, flag: u16) {
+        let mut len = self.len;
+        assert!(len + targets.count_ones() as usize <= MAX_MOVES, "move list overflow");
+        let base = (from.0 as u16) | (flag << 12);
+        while targets != 0 {
+            let to = targets.trailing_zeros() as u16;
+            // SAFETY: the assert above covers every one of the `targets.count_ones()` writes.
+            unsafe { self.moves.get_unchecked_mut(len).write(Move(base | (to << 6))) };
+            len += 1;
+            targets &= targets - 1;
+        }
+        self.len = len;
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.len
