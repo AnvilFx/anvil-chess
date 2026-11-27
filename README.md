@@ -86,16 +86,6 @@ Single thread for both engines, games played in colour-swapped opening pairs fro
 UHO 2024 book on an AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%,
 from the results of the opening pairs.
 
-The opponents are picked to sit above and below Anvil, because these unbalanced openings
-stretch Elo differences compared with CCRL: strong opponents give low estimates, weak ones
-high. Earlier versions were measured against a weaker field (with Lambergar 1.5, and Black
-Marlin 9.0, whose CCRL rating is from 8 threads), which gave 3.14.3 ~3667. On this field
-3.15.0 measured ~3645, though head to head it beats 3.14.3 by +12.3 ± 3.8 (10000 games at
-5+0.05). 3.15.1 searches the same tree 18-28% faster and beats 3.15.0 by +44 ± 16 at 10+0.1.
-3.15.2 has search changes only and beats 3.15.1 by +11.7 ± 7.7 at 5+0.05. 3.15.3 also has
-search changes only and beats 3.15.2 by +14.6 ± 8.8 at 10+0.1. 3.15.4 is 3.15.3 made faster
-and beats it by +15.6 ± 9.2 at 10+0.1; on this field it gains 23 Elo over 3.15.1 (~3662).
-
 ## Downloads
 
 Binaries for Windows and Linux are on the
