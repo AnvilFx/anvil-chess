@@ -4,6 +4,9 @@ use super::*;
 /// Eval cache size in entries, log2. Must be at least 17 (see `eval_cache`).
 const EVAL_CACHE_BITS: u32 = 18;
 const _: () = assert!(EVAL_CACHE_BITS >= 17);
+/// Material eval scaling: eval * (MAT_K + material) / (MAT_K + MAT_REF), material in pawn = 535 units, full board 25164.
+const MAT_K: i32 = 77777;
+const MAT_REF: i32 = 12000;
 
 pub(super) struct SearchCtx {
     pub(super) deadline: Option<Instant>,
@@ -50,6 +53,10 @@ pub(super) struct SearchCtx {
     pub(super) root_idx: usize,
     /// Repetition look-back stops here: positions before the last null move.
     pub(super) rep_floor: usize,
+    /// Eval offset by side to move, from the root side's recent score (positive when the root side is ahead).
+    pub(super) optimism: [i32; 2],
+    /// Optimism is on (UCI option `Optimism`); datagen turns it off so its labels stay unbiased.
+    pub(super) optimism_on: bool,
 }
 
 impl SearchCtx {
@@ -81,6 +88,8 @@ impl SearchCtx {
             hashes: Vec::with_capacity(MAX_PLY + 64),
             root_idx: 0,
             rep_floor: 0,
+            optimism: [0; 2],
+            optimism_on: true,
         }
     }
 
@@ -115,6 +124,7 @@ impl SearchCtx {
         self.hashes.extend_from_slice(history);
         self.root_idx = history.len();
         self.rep_floor = 0;
+        self.optimism = [0; 2];
     }
 
     pub(super) fn clear_heuristics(&mut self) {
@@ -153,10 +163,23 @@ impl SearchCtx {
         let _ = hash;
     }
 
+    /// The raw eval scaled by the material on the board (larger with more material, smaller in
+    /// endgames, 1.0 at MAT_REF), plus optimism weighted by the same material.
+    #[inline]
+    pub(super) fn base_eval(&self, board: &Board, raw: i32) -> i32 {
+        let material = sf_material(board);
+        let scaled = raw * (MAT_K + material) / (MAT_K + MAT_REF);
+        let o = self.optimism[board.side_to_move.idx()];
+        if o == 0 {
+            return scaled;
+        }
+        scaled + o * (7777 + material) / 77777
+    }
+
     #[inline]
     pub(super) fn corrected_eval(&self, board: &Board, raw: i32) -> i32 {
         let c = self.corr[board.side_to_move.idx()][pawn_key(board)] as i32 * self.params.corr_scale / (CORR_GRAIN * 256);
-        (raw + c).clamp(-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1)
+        (self.base_eval(board, raw) + c).clamp(-MATE_THRESHOLD + 1, MATE_THRESHOLD - 1)
     }
 
     /// Moves the correction toward `best - raw`, weighted by depth. Skips results whose bound
@@ -179,6 +202,7 @@ impl SearchCtx {
         {
             return;
         }
+        let raw = self.base_eval(board, raw);
         let target = (best - raw).clamp(-CORR_MAX / CORR_GRAIN, CORR_MAX / CORR_GRAIN) * CORR_GRAIN;
         let weight = (depth as i32 + 1).min(self.params.corr_weight_max);
         let e = &mut self.corr[board.side_to_move.idx()][pawn_key(board)];
@@ -251,4 +275,19 @@ impl SearchCtx {
             }
         }
     }
+}
+
+/// The eval offset that optimism `o` adds in `board`, weighted by the material on the board.
+#[inline]
+pub(super) fn optimism_offset(board: &Board, o: i32) -> i32 {
+    o * (7777 + sf_material(board)) / 77777
+}
+
+/// Material on the board in Stockfish-style units (pawn 535), for eval scaling and optimism.
+#[inline]
+fn sf_material(board: &Board) -> i32 {
+    let w = &board.piece_bb[0];
+    let b = &board.piece_bb[1];
+    let cnt = |k: usize| (w[k] | b[k]).count_ones() as i32;
+    535 * cnt(0) + 781 * cnt(1) + 825 * cnt(2) + 1276 * cnt(3) + 2538 * cnt(4)
 }

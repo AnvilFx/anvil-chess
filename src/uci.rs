@@ -39,6 +39,7 @@ pub fn run() {
                 println!("option name Hash type spin default {TT_DEFAULT_MB} min 1 max {TT_MAX_MB}");
                 println!("option name Move Overhead type spin default {} min 0 max 5000", timeman::MOVE_OVERHEAD_MS);
                 println!("option name NormalizeScore type check default true");
+                println!("option name Optimism type check default true");
                 for s in PARAM_SPECS {
                     println!("option name {} type spin default {} min {} max {}", s.name, s.default, s.min, s.max);
                 }
@@ -108,6 +109,10 @@ impl Session {
             }
         } else if name.eq_ignore_ascii_case("NormalizeScore") {
             self.normalize = !matches!(value.to_ascii_lowercase().as_str(), "false" | "0");
+        } else if name.eq_ignore_ascii_case("Optimism") {
+            // Datagen and relabel turn this off: optimism biases scores by how the game went.
+            let on = !matches!(value.to_ascii_lowercase().as_str(), "false" | "0");
+            self.idle().set_optimism(on);
         } else {
             set_option(self.idle(), name, value);
         }

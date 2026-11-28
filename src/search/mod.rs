@@ -125,6 +125,10 @@ impl Engine {
     pub fn set_param(&mut self, name: &str, value: i32) -> bool {
         self.params.set(name, value)
     }
+    /// Turns optimism on or off. Off, the search and its scores are those of plain 3.15.4.
+    pub fn set_optimism(&mut self, on: bool) {
+        self.ctx.optimism_on = on;
+    }
     pub fn set_hash_mb(&mut self, mb: usize) {
         // Free the old table first so both never coexist in memory.
         self.tt = Tt::with_mb(1);
@@ -177,6 +181,12 @@ fn pv_from_tt(board: &mut Board, first: Move, tt: &Tt, max_len: usize) -> Vec<Mo
     }
     line
 }
+/// Optimism = OPTIMISM_MUL * avg / (|avg| + OPTIMISM_DIV), from the root side's averaged score.
+const OPTIMISM_MUL: i32 = 633;
+const OPTIMISM_DIV: i32 = 140;
+
+/// Iterative deepening starts this many plies below the depth of a usable root TT entry.
+const TT_START_BELOW: i32 = 1;
 /// Node-based time scaling starts once this many iterations have completed.
 const NODE_TM_MIN_DEPTH: u32 = 7;
 
@@ -221,13 +231,45 @@ fn run_search(
     let mut prev_score = 0;
     let mut bm_stability: u32 = 0;
     let mut completed_depth: u32 = 0;
+    // Running average of the root score, for optimism.
+    let mut avg_score: Option<i32> = None;
+    // `best_score` without the optimism offset, for reporting.
+    let mut best_report = 0;
 
-    for d in 1..=limits.max_depth.min(MAX_PLY as u32) {
-        // Depth 1 always runs so there is a move to return.
-        if d > 1 && ctx.nodes >= limits.soft_nodes {
+    // A root entry left by the previous search already covers the shallow iterations: start just
+    // below its depth, with its move and score, as if those iterations had agreed on the move.
+    let mut first_d = 1;
+    if let Some(e) = tt.probe(board.hash) {
+        let mv = Move(e.move_packed);
+        let s = tt_score_from_probe(e.score, 0);
+        let start = e.depth as i32 - TT_START_BELOW;
+        if (e.bound() == BOUND_EXACT || e.bound() == BOUND_LOWER)
+            && start >= 2
+            && s.abs() < MATE_THRESHOLD
+            && {
+                let mut legal = MoveList::new();
+                board.gen_legal_into(&mut legal);
+                let found = legal.iter().any(|m| m == mv);
+                found
+            }
+        {
+            first_d = (start as u32).min(limits.max_depth.max(1));
+            best_move = Some(mv);
+            best_score = s;
+            prev_score = s;
+            bm_stability = first_d - 1;
+            // The skipped iterations would have averaged to about this score, so optimism starts from it.
+            avg_score = Some(s);
+            best_report = s;
+        }
+    }
+
+    for d in first_d..=limits.max_depth.min(MAX_PLY as u32) {
+        // The first iteration always runs so there is a searched move to return.
+        if d > first_d && ctx.nodes >= limits.soft_nodes {
             break;
         }
-        if limits.soft_ms != u64::MAX && d > 1 {
+        if limits.soft_ms != u64::MAX && d > first_d {
             let target = if fixed_time {
                 limits.soft_ms
             } else {
@@ -242,6 +284,12 @@ fn run_search(
             }
         }
 
+        if let Some(a) = avg_score.filter(|_| ctx.optimism_on) {
+            let o = OPTIMISM_MUL * a / (a.abs() + OPTIMISM_DIV);
+            let us = board.side_to_move.idx();
+            ctx.optimism[us] = o;
+            ctx.optimism[1 - us] = -o;
+        }
         let (m, s, lower_bound) = search_root_aspiration(board, d, best_move, best_score, ctx, tt);
         if ctx.stop && d > 1 {
             // A stopped iteration only returns a move that was fully searched and beat
@@ -257,21 +305,24 @@ fn run_search(
             best_move = m;
             best_score = s;
             completed_depth = d;
+            let sc = s.clamp(-MATE_THRESHOLD, MATE_THRESHOLD);
+            avg_score = Some(avg_score.map_or(sc, |a| (a + sc) / 2));
 
+            let root_pv = ctx.root_pv();
+            let tt_line;
+            let pv = if root_pv.first() == m.as_ref() && root_pv.len() > 1 {
+                root_pv
+            } else {
+                // A fail high records no line below the root move; the TT still has one.
+                tt_line = pv_from_tt(board, mv, tt, d as usize);
+                &tt_line[..]
+            };
+            best_report = without_optimism(board, pv, s, ctx.optimism[board.side_to_move.idx()]);
             if let Some(report) = on_iter.as_mut() {
-                let root_pv = ctx.root_pv();
-                let tt_line;
-                let pv = if root_pv.first() == m.as_ref() && root_pv.len() > 1 {
-                    root_pv
-                } else {
-                    // A fail high records no line below the root move; the TT still has one.
-                    tt_line = pv_from_tt(board, mv, tt, d as usize);
-                    &tt_line[..]
-                };
                 report(&IterInfo {
                     depth: d,
                     seldepth: ctx.seldepth as u32,
-                    score: s,
+                    score: best_report,
                     nodes: ctx.nodes,
                     elapsed_ms: start.elapsed().as_millis() as u64,
                     hashfull: tt.hashfull(),
@@ -292,5 +343,20 @@ fn run_search(
         board.gen_legal_into(&mut moves);
         best_move = moves.iter().next();
     }
-    (best_move, best_score, ctx.nodes, completed_depth)
+    (best_move, best_report, ctx.nodes, completed_depth)
+}
+
+/// The root score `s` with the optimism offset `o` (root side's) taken out, so reported
+/// scores don't depend on how the game went. The offset is weighted by the material where
+/// the PV ends, which is where the score came from (exact when the PV reaches the leaf).
+/// Mate and draw scores carry no offset.
+fn without_optimism(board: &Board, pv: &[Move], s: i32, o: i32) -> i32 {
+    if o == 0 || s == 0 || s.abs() >= MATE_THRESHOLD {
+        return s;
+    }
+    let mut b = board.clone();
+    for &m in pv {
+        b.make_move(m);
+    }
+    s - context::optimism_offset(&b, o)
 }

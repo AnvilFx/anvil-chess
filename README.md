@@ -30,6 +30,8 @@ Banksia, fastchess, ...).
 **Search**
 - Iterative deepening, principal variation search, aspiration windows; a root fail high
   ends the iteration without a re-search
+- A new search starts one ply below the depth of the root's TT entry, keeping its move and
+  score
 - Transposition table (4-entry buckets, 64 MB by default), backed by huge pages on Linux
 - Null move pruning, razoring, reverse futility pruning, futility pruning, late move pruning,
   SEE pruning, ProbCut
@@ -52,6 +54,8 @@ Banksia, fastchess, ...).
   mirroring, pairwise CReLU on the accumulator, a sparse int8 first dense layer, SCReLU
   float layers after it, eight output buckets by piece count
 - Trained on 3.6B positions from Anvil's own self-play
+- The eval is scaled by the material on the board and, like Stockfish, gets an optimism
+  term that leans toward the side the search currently favours
 - Incrementally updated accumulators with a per-king-bucket refresh cache
 - A 2 MB eval cache keyed by the full hash, prefetched along with the TT entry
 - AVX2, AVX-VNNI and AVX-512 paths selected at runtime, with a scalar fallback
@@ -122,6 +126,7 @@ iteration in progress once N nodes are searched and stops mid-iteration only at 
 | Hash | 64 | 1-32768 | Transposition table size in MB |
 | Move Overhead | 15 | 0-5000 | Milliseconds kept back for GUI and OS latency (at most half of a `movetime`) |
 | NormalizeScore | true | | Report normalized scores (see below); `false` gives raw search scores |
+| Optimism | true | | Optimism in the eval; reported scores leave it out. Turn it off when generating training data |
 
 The other options (`RFPMargin`, `LMRBase`, `SEEQuietMargin`, ...) are search parameters
 exposed for SPSA tuning. The defaults are the tuned values; leave them alone for play.
