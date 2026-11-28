@@ -8,7 +8,7 @@
 </h1>
 
 <p align="center">
-  <a href="#strength"><img src="https://img.shields.io/badge/strength-~3685%20Elo-orange" alt="Strength: about 3685 Elo"></a>
+  <a href="#strength"><img src="https://img.shields.io/badge/strength-~3698%20Elo-orange" alt="Strength: about 3698 Elo"></a>
   <a href="#the-net"><img src="https://img.shields.io/badge/self--play%20data-3.6B%20positions-blue" alt="Self-play data: 3.6B positions"></a>
   <a href="#uci"><img src="https://img.shields.io/badge/protocol-UCI-blue" alt="Protocol: UCI"></a>
   <a href="#building"><img src="https://img.shields.io/badge/forged%20in-Rust-orange?logo=rust&logoColor=white" alt="Forged in Rust"></a>
@@ -74,17 +74,17 @@ hardware than CCRL.
 
 | Anvil | Opponent | CCRL Blitz | TC | Games | W / D / L | Elo diff | Estimate |
 |---|---|---|---|---|---|---|---|
-| 3.15.4 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 54 / 450 / 496 | -165 ± 8 | ~3602 |
-| 3.15.4 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 68 / 467 / 465 | -146 ± 9 | ~3596 |
-| 3.15.4 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 161 / 514 / 325 | -58 ± 11 | ~3663 |
-| 3.15.4 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 160 / 484 / 356 | -69 ± 11 | ~3632 |
-| 3.15.4 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 367 / 398 / 235 | +46 ± 12 | ~3702 |
-| 3.15.4 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 417 / 423 / 160 | +91 ± 13 | ~3742 |
-| 3.15.4 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 374 / 388 / 238 | +48 ± 12 | ~3699 |
-| 3.15.4 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 341 / 466 / 193 | +52 ± 12 | ~3696 |
-| 3.15.4 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 463 / 447 / 90 | +136 ± 12 | ~3758 |
-| 3.15.4 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 556 / 342 / 102 | +170 ± 15 | ~3761 |
-| **Average** | | | | | | | **~3685** |
+| 3.15.5 | Reckless 0.9.0 | 3767 | 20+0.2 | 1000 | 53 / 452 / 495 | -165 ± 9 | ~3602 |
+| 3.15.5 | Hobbes 4.0 | 3742 | 20+0.2 | 1000 | 78 / 458 / 464 | -141 ± 10 | ~3601 |
+| 3.15.5 | Halogen 16.0.0 | 3720 | 20+0.2 | 1000 | 218 / 476 / 306 | -31 ± 12 | ~3689 |
+| 3.15.5 | Minke 7.0.0 | 3701 | 20+0.2 | 1000 | 185 / 457 / 358 | -61 ± 11 | ~3640 |
+| 3.15.5 | Stockfish 12 | 3656 | 20+0.2 | 1000 | 368 / 432 / 200 | +59 ± 12 | ~3715 |
+| 3.15.5 | Booot 7.4 | 3651 | 20+0.2 | 1000 | 449 / 377 / 174 | +98 ± 13 | ~3749 |
+| 3.15.5 | Cataphract 1.5.1 | 3651 | 20+0.2 | 1000 | 389 / 451 / 160 | +81 ± 13 | ~3732 |
+| 3.15.5 | Prune 4.0.1 | 3644 | 20+0.2 | 1000 | 359 / 476 / 165 | +68 ± 12 | ~3712 |
+| 3.15.5 | Bread 4.0.0 | 3622 | 20+0.2 | 1000 | 476 / 430 / 94 | +140 ± 12 | ~3762 |
+| 3.15.5 | Thrawn 3.2 | 3591 | 20+0.2 | 1000 | 555 / 380 / 65 | +186 ± 14 | ~3777 |
+| **Average** | | | | | | | **~3698** |
 
 Single thread for both engines, games played in colour-swapped opening pairs from the
 UHO 2024 book on an AMD EPYC 9R14 server running 124 games at a time. Error bars are 95%,
